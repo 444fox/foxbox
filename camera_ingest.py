@@ -2,9 +2,13 @@
 Camera Ingest Tool  v2
   Tab 1 — Ingest : scan SD → rename by capture time → copy to USB + server → verify → delete
   Tab 2 — Safe Delete : scan SD + server, match by SHA256 hash, delete confirmed copies from SD
+  Tab 3 — Low-Res : make Google-Photos-friendly low-res JPEG copies of a folder
+  Tab 4 — Weed : quickly accept/reject photos — accepted stay in place,
+                 rejects move to a 'rejects' subfolder beside the photo
 """
 
 import os
+import stat
 import json
 import shutil
 import hashlib
@@ -16,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageTk, ImageOps
     from PIL.ExifTags import TAGS
     PILLOW_AVAILABLE = True
 except ImportError:
@@ -33,7 +37,7 @@ except ImportError:
 PHOTO_EXT = {'.jpg','.jpeg','.png','.cr2','.cr3','.nef','.arw',
              '.dng','.heic','.heif','.tif','.tiff','.raf','.orf'}
 VIDEO_EXT = {'.mp4','.mov','.avi','.mts','.m2ts','.mkv',
-             '.mxf','.3gp','.wmv'}
+             '.mxf','.3gp','.wmv','.insv'}
 ALL_EXT   = PHOTO_EXT | VIDEO_EXT
 
 # ── Theme ──────────────────────────────────────────────────────────────────────
@@ -54,6 +58,16 @@ SUB     = ('Segoe UI', 11)
 SEMIBOLD= ('Segoe UI Semibold', 11)
 
 # ── Shared helpers ─────────────────────────────────────────────────────────────
+
+def delete_file(path: Path):
+    """Delete a file, clearing the read-only attribute first (camera files
+    often arrive read-only on Windows, which makes unlink fail with WinError 5)."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+    except OSError:
+        pass
+    path.unlink()
+
 
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
@@ -104,6 +118,24 @@ def sha256_cached(path: Path, cache: dict) -> str:
     h = sha256_file(path)
     cache[key] = {'hash': h, 'size': size, 'mtime': mtime}
     return h
+
+
+def video_fingerprint(path: Path) -> str:
+    """
+    Quick identity check for large video files (MP4/MOV/INSV…): hash of the
+    first and last 1 MB plus the size. Avoids reading multi-GB files in full;
+    combined with the same-size prefilter it is a very strong match signal.
+    """
+    h = hashlib.sha256()
+    size = path.stat().st_size
+    chunk = 1 << 20
+    with open(path, 'rb') as f:
+        h.update(f.read(chunk))
+        if size > 2 * chunk:
+            f.seek(size - chunk)
+            h.update(f.read(chunk))
+    h.update(str(size).encode())
+    return 'vfp:' + h.hexdigest()
 
 
 def get_capture_time(path: Path):
@@ -170,7 +202,20 @@ def copy_verify(src: Path, dst: Path, log_fn) -> bool:
     try:
         dst.parent.mkdir(parents=True, exist_ok=True)
         log_fn(f"  → Copying to {dst}")
+        if dst.exists():
+            # Earlier copies may carry the camera's read-only flag —
+            # clear it or the overwrite fails with Errno 13.
+            try:
+                os.chmod(dst, stat.S_IWRITE)
+            except OSError:
+                pass
         shutil.copy2(src, dst)
+        # copy2 preserves the source's read-only attribute; strip it so the
+        # destination stays writable for future runs.
+        try:
+            os.chmod(dst, stat.S_IWRITE)
+        except OSError:
+            pass
         if sha256_file(src) == sha256_file(dst):
             log_fn(f"  ✓ Verified  {dst.name}", 'ok')
             return True
@@ -257,6 +302,9 @@ class IngestTab(tk.Frame):
         path_row(pf, "SD Card / Source",           self._sd_var,     lambda: self._browse(self._sd_var,     "Select SD Card Root"),           0)
         path_row(pf, "Local USB Destination",       self._local_var,  lambda: self._browse(self._local_var,  "Select Local USB Destination"),   1)
         path_row(pf, "Remote Server Destination",   self._remote_var, lambda: self._browse(self._remote_var, "Select Remote Server Destination"),2)
+        tk.Label(pf, text="Leave a destination blank to skip it — at least one is required.",
+                 font=UI, bg=PANEL, fg=DIM
+                 ).grid(row=3, column=0, columnspan=3, padx=12, pady=(0,6), sticky='w')
 
         # Options
         of = lf(c, "Options")
@@ -317,8 +365,12 @@ class IngestTab(tk.Frame):
         sd, local, remote = (self._sd_var.get().strip(),
                              self._local_var.get().strip(),
                              self._remote_var.get().strip())
-        if not sd or not local or not remote:
-            messagebox.showerror("Missing Paths", "Please set all three paths.")
+        if not sd:
+            messagebox.showerror("Missing Paths", "Please set the SD card / source path.")
+            return
+        if not local and not remote:
+            messagebox.showerror("Missing Paths",
+                                 "Please set at least one destination (local USB or remote server).")
             return
         sd_p = Path(sd)
         if not sd_p.exists():
@@ -329,7 +381,9 @@ class IngestTab(tk.Frame):
         self._names.clear()
         self._prog_var.set(0)
         threading.Thread(target=self._run,
-                         args=(sd_p, Path(local), Path(remote)),
+                         args=(sd_p,
+                               Path(local) if local else None,
+                               Path(remote) if remote else None),
                          daemon=True).start()
 
     def _run(self, sd_p, local_p, remote_p):
@@ -340,8 +394,8 @@ class IngestTab(tk.Frame):
             self._status_var.set("Scanning SD card…")
             log("═"*60, 'accent')
             log(f"Source      : {sd_p}", 'accent')
-            log(f"Local dest  : {local_p}", 'accent')
-            log(f"Remote dest : {remote_p}", 'accent')
+            log(f"Local dest  : {local_p if local_p else '— skipped —'}", 'accent')
+            log(f"Remote dest : {remote_p if remote_p else '— skipped —'}", 'accent')
             log("═"*60, 'accent')
 
             files = scan_media(sd_p)
@@ -357,11 +411,34 @@ class IngestTab(tk.Frame):
 
             total = len(timed)
             success, failed = [], []
+            seen_hashes: dict = {}   # content hash -> dest name already copied
+            duplicates = 0
 
             for i, (src, ct) in enumerate(timed, 1):
                 self._prog_var.set((i-1)/total*100)
                 self._status_var.set(f"Processing {i}/{total}: {src.name}")
                 log(f"\n[{i}/{total}] {src.name}", 'accent')
+
+                # Skip exact duplicates (same content already copied this run)
+                try:
+                    if src.suffix.lower() in VIDEO_EXT:
+                        src_hash = video_fingerprint(src)
+                    else:
+                        src_hash = sha256_file(src)
+                except OSError as e:
+                    log(f"  ✗ Could not read file: {e}", 'error')
+                    failed.append(src)
+                    continue
+                if src_hash in seen_hashes:
+                    duplicates += 1
+                    log(f"  ⊃ Duplicate of {seen_hashes[src_hash]} — copy skipped", 'warn')
+                    if do_del:
+                        try:
+                            delete_file(src)
+                            log(f"  🗑  Deleted duplicate source: {src.name}", 'ok')
+                        except Exception as e:
+                            log(f"  ✗ Could not delete source: {e}", 'error')
+                    continue
 
                 if ct:
                     log(f"  Captured : {ct.strftime('%Y-%m-%d %H:%M:%S')}", 'dim')
@@ -376,14 +453,15 @@ class IngestTab(tk.Frame):
 
                 def _log_line(msg, tag='info'): log(msg, tag)
 
-                ok_l = copy_verify(src, local_p  / sub / dest_name, _log_line)
-                ok_r = copy_verify(src, remote_p / sub / dest_name, _log_line)
+                ok_l = copy_verify(src, local_p  / sub / dest_name, _log_line) if local_p  else True
+                ok_r = copy_verify(src, remote_p / sub / dest_name, _log_line) if remote_p else True
 
                 if ok_l and ok_r:
                     success.append(src)
+                    seen_hashes[src_hash] = dest_name
                     if do_del:
                         try:
-                            src.unlink()
+                            delete_file(src)
                             log(f"  🗑  Deleted source: {src.name}", 'ok')
                         except Exception as e:
                             log(f"  ✗ Could not delete source: {e}", 'error')
@@ -395,7 +473,8 @@ class IngestTab(tk.Frame):
 
             self._prog_var.set(100)
             log("\n"+"═"*60, 'accent')
-            log(f"DONE  —  {len(success)} succeeded, {len(failed)} failed",
+            log(f"DONE  —  {len(success)} succeeded, {duplicates} duplicate(s) skipped, "
+                f"{len(failed)} failed",
                 'ok' if not failed else 'warn')
             if failed:
                 log("Files NOT deleted (copy error):", 'error')
@@ -685,7 +764,7 @@ class SafeDeleteTab(tk.Frame):
             # For video files: if name AND size match, accept as confirmed.
             # For everything else: require hash match.
             CONTAINER_EXTS = {'.mp4', '.mov', '.mts', '.m2ts', '.mkv',
-                               '.mxf', '.3gp', '.wmv', '.avi'}
+                               '.mxf', '.3gp', '.wmv', '.avi', '.insv'}
 
             def verify_pair(pair):
                 nonlocal matched, unmatched
@@ -1017,7 +1096,7 @@ class SafeDeleteTab(tk.Frame):
 
         for idx, (sd_file, server_file, _) in enumerate(self._matches):
             try:
-                sd_file.unlink()
+                delete_file(sd_file)
                 log(f"  🗑  Deleted: {sd_file.name}", 'ok')
                 if idx < len(matched_items):
                     self._tree.item(matched_items[idx],
@@ -1044,6 +1123,777 @@ class SafeDeleteTab(tk.Frame):
             if n < 1024: return f"{n:.0f} {unit}"
             n /= 1024
         return f"{n:.1f} TB"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — Low-Res Converter
+# ══════════════════════════════════════════════════════════════════════════════
+
+class LowResTab(tk.Frame):
+    """
+    Make low-res JPEG copies of every photo in a folder — sized for quick
+    Google Photos uploads. Originals are never touched.
+    """
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG)
+        self._src_var     = tk.StringVar()
+        self._dst_var     = tk.StringVar()
+        self._edge_var    = tk.StringVar(value='2048')
+        self._quality_var = tk.StringVar(value='85')
+        self._subdir_var  = tk.BooleanVar(value=True)
+        self._skip_var    = tk.BooleanVar(value=True)
+        self._status_var  = tk.StringVar(value="Ready.")
+        self._prog_var    = tk.DoubleVar(value=0.0)
+        self._running     = False
+        self._cancel_requested = False
+        self._build()
+
+    def _build(self):
+        c = tk.Frame(self, bg=BG)
+        c.pack(fill='both', expand=True, padx=28, pady=18)
+
+        # Paths
+        pf = lf(c, "Paths")
+        pf.pack(fill='x', pady=(0,14))
+        pf.grid_columnconfigure(1, weight=1)
+        path_row(pf, "Source Photos Folder",  self._src_var,
+                 lambda: self._browse(self._src_var, "Select Source Photos Folder"), 0)
+        path_row(pf, "Low-Res Output Folder", self._dst_var,
+                 lambda: self._browse(self._dst_var, "Select Low-Res Output Folder"), 1)
+
+        # Options
+        of = lf(c, "Options")
+        of.pack(fill='x', pady=(0,14))
+        tk.Label(of, text="Max long edge (px)", font=LABEL, bg=PANEL, fg=TEXT
+                 ).grid(row=0, column=0, padx=(12,6), pady=8, sticky='w')
+        tk.Entry(of, textvariable=self._edge_var, width=7,
+                 bg='#2c3140', fg=TEXT, insertbackground=TEXT,
+                 relief='flat', font=UI
+                 ).grid(row=0, column=1, padx=(0,20), pady=8, sticky='w')
+        tk.Label(of, text="JPEG quality (1–95)", font=LABEL, bg=PANEL, fg=TEXT
+                 ).grid(row=0, column=2, padx=(0,6), pady=8, sticky='w')
+        tk.Entry(of, textvariable=self._quality_var, width=5,
+                 bg='#2c3140', fg=TEXT, insertbackground=TEXT,
+                 relief='flat', font=UI
+                 ).grid(row=0, column=3, padx=(0,20), pady=8, sticky='w')
+        tk.Checkbutton(of, text="Mirror subfolder structure", variable=self._subdir_var,
+                       bg=PANEL, fg=TEXT, activebackground=PANEL,
+                       selectcolor=BG, font=UI
+                       ).grid(row=1, column=0, columnspan=2, padx=12, pady=(0,8), sticky='w')
+        tk.Checkbutton(of, text="Skip files already converted", variable=self._skip_var,
+                       bg=PANEL, fg=TEXT, activebackground=PANEL,
+                       selectcolor=BG, font=UI
+                       ).grid(row=1, column=2, columnspan=2, pady=(0,8), sticky='w')
+
+        # Progress
+        tk.Label(c, textvariable=self._status_var, bg=BG, fg=DIM,
+                 font=UI, anchor='w').pack(fill='x', pady=(0,4))
+        style = ttk.Style()
+        style.configure("LR.Horizontal.TProgressbar",
+                        troughcolor=PANEL, background=GREEN,
+                        bordercolor=PANEL, lightcolor=GREEN, darkcolor=GREEN)
+        ttk.Progressbar(c, variable=self._prog_var, maximum=100,
+                        style="LR.Horizontal.TProgressbar"
+                        ).pack(fill='x', pady=(0,10))
+
+        # Log
+        lframe = lf(c, "Activity Log")
+        lframe.pack(fill='both', expand=True, pady=(0,14))
+        self._log = make_log(lframe)
+        self._log.pack(fill='both', expand=True, padx=4, pady=4)
+
+        # Buttons
+        br = tk.Frame(c, bg=BG)
+        br.pack(fill='x')
+        self._start_btn = tk.Button(br, text="▶  START CONVERT",
+                                    command=self._start,
+                                    bg=GREEN, fg=BG,
+                                    activebackground='#6fd09d', activeforeground=BG,
+                                    relief='flat', font=SEMIBOLD,
+                                    cursor='hand2', padx=22, pady=8)
+        self._start_btn.pack(side='left')
+        self._cancel_btn = tk.Button(br, text="✕  CANCEL",
+                                     command=self._cancel,
+                                     bg=RED, fg=BG,
+                                     activebackground='#f07070', activeforeground=BG,
+                                     relief='flat', font=SEMIBOLD,
+                                     cursor='hand2', padx=16, pady=8,
+                                     state='disabled')
+        self._cancel_btn.pack(side='left', padx=(10,0))
+        tk.Button(br, text="Clear Log",
+                  command=lambda: (self._log.configure(state='normal'),
+                                   self._log.delete('1.0','end'),
+                                   self._log.configure(state='disabled')),
+                  bg=PANEL, fg=DIM, activebackground=BG,
+                  relief='flat', font=UI, cursor='hand2', padx=14, pady=8
+                  ).pack(side='left', padx=(10,0))
+
+    def _browse(self, var, title):
+        p = filedialog.askdirectory(title=title)
+        if p: var.set(p)
+
+    def log(self, msg, tag='info'):
+        wlog(self._log, msg, tag)
+
+    def _cancel(self):
+        if self._running:
+            self._cancel_requested = True
+            self._cancel_btn.configure(state='disabled', text="Cancelling…")
+
+    def _start(self):
+        if self._running: return
+        if not PILLOW_AVAILABLE:
+            messagebox.showerror("Pillow Required",
+                                 "The low-res converter needs Pillow.\n\npip install Pillow")
+            return
+        src, dst = self._src_var.get().strip(), self._dst_var.get().strip()
+        if not src or not dst:
+            messagebox.showerror("Missing Paths", "Please set both source and output folders.")
+            return
+        src_p, dst_p = Path(src), Path(dst)
+        if not src_p.exists():
+            messagebox.showerror("Not Found", f"Source folder not found:\n{src}")
+            return
+        try:
+            edge = int(self._edge_var.get())
+            quality = int(self._quality_var.get())
+            if edge < 100 or not (1 <= quality <= 95):
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Bad Settings",
+                                 "Max long edge must be ≥ 100 and quality 1–95.")
+            return
+        if dst_p.resolve() == src_p.resolve():
+            messagebox.showerror("Bad Paths", "Output folder must differ from source.")
+            return
+        self._running = True
+        self._cancel_requested = False
+        self._prog_var.set(0)
+        self._start_btn.configure(state='disabled', text="⏳  Converting…")
+        self._cancel_btn.configure(state='normal', text="✕  CANCEL")
+        threading.Thread(target=self._run,
+                         args=(src_p, dst_p, edge, quality),
+                         daemon=True).start()
+
+    def _run(self, src_p: Path, dst_p: Path, edge: int, quality: int):
+        log = self.log
+        do_sub  = self._subdir_var.get()
+        do_skip = self._skip_var.get()
+        try:
+            log("═"*60, 'accent')
+            log(f"Source  : {src_p}", 'accent')
+            log(f"Output  : {dst_p}", 'accent')
+            log(f"Settings: max edge {edge}px, JPEG quality {quality}", 'accent')
+            log("═"*60, 'accent')
+
+            self._status_var.set("Scanning for photos…")
+            photos = [f for f in scan_media(src_p) if f.suffix.lower() in PHOTO_EXT]
+            # Don't re-convert our own output if it lives inside the source tree
+            photos = [f for f in photos if dst_p not in f.parents]
+            if not photos:
+                log("No photos found.", 'warn')
+                self._status_var.set("No photos found.")
+                return
+            log(f"Found {len(photos)} photo(s).", 'ok')
+
+            total = len(photos)
+            done = skipped = failed = 0
+            for i, src in enumerate(photos, 1):
+                if self._cancel_requested:
+                    log("Conversion cancelled by user.", 'warn')
+                    break
+                self._prog_var.set((i-1)/total*100)
+                self._status_var.set(f"Converting {i}/{total}: {src.name}")
+
+                sub = src.parent.relative_to(src_p) if do_sub else Path('')
+                out = dst_p / sub / (src.stem + '.jpg')
+
+                if do_skip and out.exists():
+                    skipped += 1
+                    continue
+                try:
+                    with Image.open(src) as img:
+                        # Bake in EXIF orientation so the copy displays upright
+                        img = ImageOps.exif_transpose(img)
+                        img.thumbnail((edge, edge), Image.LANCZOS)
+                        if img.mode not in ('RGB', 'L'):
+                            img = img.convert('RGB')
+                        out.parent.mkdir(parents=True, exist_ok=True)
+                        exif = img.info.get('exif')
+                        save_kw = dict(quality=quality, optimize=True)
+                        if exif:
+                            save_kw['exif'] = exif
+                        img.save(out, 'JPEG', **save_kw)
+                    done += 1
+                    log(f"  ✓ {src.name}  →  {out.relative_to(dst_p)}", 'ok')
+                except Exception as e:
+                    failed += 1
+                    log(f"  ✗ {src.name}: {e}", 'error')
+
+            self._prog_var.set(100)
+            log("─"*60, 'dim')
+            log(f"DONE — {done} converted, {skipped} skipped, {failed} failed.",
+                'ok' if not failed else 'warn')
+            self._status_var.set(
+                f"Complete: {done} converted, {skipped} skipped, {failed} failed.")
+
+        except Exception as e:
+            import traceback
+            log(f"\n✗ Unexpected error: {e}", 'error')
+            log(traceback.format_exc(), 'error')
+            self._status_var.set("Error — see log.")
+        finally:
+            self._running = False
+            self._cancel_requested = False
+            self.after(0, lambda: self._start_btn.configure(
+                state='normal', text="▶  START CONVERT"))
+            self.after(0, lambda: self._cancel_btn.configure(
+                state='disabled', text="✕  CANCEL"))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — Weed (accept / reject sorter)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class WeedTab(tk.Frame):
+    """
+    Flip through photos one at a time and sort them fast:
+      ↑ / A  = accept  (photo stays exactly where it is)
+      ↓ / R  = reject  (moved to a 'rejects' subfolder next to the photo,
+                        so the date structure is preserved)
+      ← / U  = undo last accept/reject
+    """
+    REJECT_DIR = 'rejects'
+
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG)
+        self._src_var    = tk.StringVar()
+        self._status_var = tk.StringVar(value="Pick a folder and click Start Weeding.")
+        self._count_var  = tk.StringVar(value="")
+        self._active     = False
+        self._queue: list = []      # photos still to review
+        self._idx        = 0
+        self._history: list = []    # (original_path, moved_to_path)
+        self._photo_ref  = None     # keep ImageTk reference alive
+        self._accepted = 0
+        self._rejected = 0
+        self._build()
+
+    def _build(self):
+        c = tk.Frame(self, bg=BG)
+        c.pack(fill='both', expand=True, padx=28, pady=18)
+
+        # Paths
+        pf = lf(c, "Folder")
+        pf.pack(fill='x', pady=(0,10))
+        pf.grid_columnconfigure(1, weight=1)
+        path_row(pf, "Photos Folder to Weed", self._src_var,
+                 lambda: self._browse(self._src_var, "Select Folder to Weed"), 0)
+
+        # Status row
+        sr = tk.Frame(c, bg=BG)
+        sr.pack(fill='x', pady=(0,6))
+        tk.Label(sr, textvariable=self._status_var, bg=BG, fg=DIM,
+                 font=UI, anchor='w').pack(side='left')
+        tk.Label(sr, textvariable=self._count_var, bg=BG, fg=BLUE,
+                 font=SEMIBOLD, anchor='e').pack(side='right')
+
+        # Image viewer
+        self._canvas = tk.Canvas(c, bg='#111318', highlightthickness=1,
+                                 highlightbackground=DIM)
+        self._canvas.pack(fill='both', expand=True, pady=(0,10))
+        self._canvas.bind('<Configure>', lambda e: self._show_current())
+        self._canvas.bind('<Button-1>', lambda e: self.focus_set())
+
+        # Keyboard shortcuts hint
+        tk.Label(c, text="↑ / A = Accept (stays in place)      ↓ / R = Reject (→ rejects subfolder)      ← / U = Undo",
+                 bg=BG, fg=DIM, font=UI).pack(pady=(0,8))
+
+        # Buttons
+        br = tk.Frame(c, bg=BG)
+        br.pack(fill='x')
+        self._start_btn = tk.Button(br, text="▶  START WEEDING",
+                                    command=self._start,
+                                    bg=BLUE, fg=BG,
+                                    activebackground='#7bbfe8', activeforeground=BG,
+                                    relief='flat', font=SEMIBOLD,
+                                    cursor='hand2', padx=22, pady=8)
+        self._start_btn.pack(side='left')
+
+        self._accept_btn = tk.Button(br, text="✓  ACCEPT",
+                                     command=self._accept,
+                                     bg=GREEN, fg=BG,
+                                     activebackground='#6fd09d', activeforeground=BG,
+                                     relief='flat', font=SEMIBOLD,
+                                     cursor='hand2', padx=20, pady=8,
+                                     state='disabled')
+        self._accept_btn.pack(side='left', padx=(14,0))
+
+        self._reject_btn = tk.Button(br, text="✗  REJECT",
+                                     command=self._reject,
+                                     bg=RED, fg=BG,
+                                     activebackground='#f07070', activeforeground=BG,
+                                     relief='flat', font=SEMIBOLD,
+                                     cursor='hand2', padx=20, pady=8,
+                                     state='disabled')
+        self._reject_btn.pack(side='left', padx=(10,0))
+
+        self._undo_btn = tk.Button(br, text="↩  UNDO",
+                                   command=self._undo,
+                                   bg=PANEL, fg=YELLOW, activebackground=BG,
+                                   relief='flat', font=SEMIBOLD,
+                                   cursor='hand2', padx=16, pady=8,
+                                   state='disabled')
+        self._undo_btn.pack(side='left', padx=(10,0))
+
+        # Key bindings (only act while a weeding session is active)
+        for key, fn in (('<Up>',    self._accept), ('a', self._accept), ('A', self._accept),
+                        ('<Down>',  self._reject), ('r', self._reject), ('R', self._reject),
+                        ('<Left>',  self._undo),   ('u', self._undo), ('U', self._undo)):
+            self.bind(key, lambda e, fn=fn: fn())
+
+    def _browse(self, var, title):
+        p = filedialog.askdirectory(title=title)
+        if p: var.set(p)
+
+    # ── Session ───────────────────────────────────────────────────────────────
+
+    def _start(self):
+        if not PILLOW_AVAILABLE:
+            messagebox.showerror("Pillow Required",
+                                 "The weeding tool needs Pillow to preview photos.\n\npip install Pillow")
+            return
+        src = self._src_var.get().strip()
+        if not src:
+            messagebox.showerror("Missing Path", "Please pick a folder to weed.")
+            return
+        src_p = Path(src)
+        if not src_p.exists():
+            messagebox.showerror("Not Found", f"Folder not found:\n{src}")
+            return
+
+        # Skip anything already sitting inside a rejects folder (any level)
+        photos = [f for f in scan_media(src_p)
+                  if f.suffix.lower() in PHOTO_EXT
+                  and self.REJECT_DIR not in (p.name.lower() for p in f.parents)]
+        photos.sort(key=lambda f: str(f).lower())
+        if not photos:
+            messagebox.showinfo("Nothing to Weed",
+                                "No photos found (rejects folders are excluded).")
+            return
+
+        self._queue    = photos
+        self._idx      = 0
+        self._history  = []
+        self._accepted = 0
+        self._rejected = 0
+        self._active   = True
+        for b in (self._accept_btn, self._reject_btn):
+            b.configure(state='normal')
+        self._undo_btn.configure(state='disabled')
+        self._start_btn.configure(text="↻  RESTART")
+        self.focus_set()
+        self._show_current()
+
+    def _current(self):
+        if self._active and 0 <= self._idx < len(self._queue):
+            return self._queue[self._idx]
+        return None
+
+    def _show_current(self):
+        cur = self._current()
+        self._canvas.delete('all')
+        cw = self._canvas.winfo_width()
+        ch = self._canvas.winfo_height()
+        remaining = len(self._queue) - self._idx if self._active else 0
+        self._count_var.set(
+            f"✓ {self._accepted}   ✗ {self._rejected}   remaining {remaining}"
+            if self._active else "")
+
+        if cur is None:
+            if self._active:
+                self._status_var.set(
+                    f"Done! {self._accepted} accepted, {self._rejected} rejected.")
+                self._canvas.create_text(cw//2, ch//2,
+                                         text="🎉  All photos weeded",
+                                         fill=GREEN, font=SEMIBOLD)
+                for b in (self._accept_btn, self._reject_btn):
+                    b.configure(state='disabled')
+            return
+
+        self._status_var.set(str(cur.relative_to(Path(self._src_var.get().strip()))))
+        if cw < 20 or ch < 20:
+            return
+        try:
+            with Image.open(cur) as img:
+                img = ImageOps.exif_transpose(img)
+                img.thumbnail((cw - 8, ch - 8), Image.LANCZOS)
+                self._photo_ref = ImageTk.PhotoImage(img)
+            self._canvas.create_image(cw//2, ch//2, image=self._photo_ref)
+        except Exception as e:
+            self._canvas.create_text(cw//2, ch//2,
+                                     text=f"⚠  Cannot preview\n{cur.name}\n{e}\n\n"
+                                          "You can still Accept / Reject it.",
+                                     fill=YELLOW, font=UI, justify='center')
+
+    # ── Actions ───────────────────────────────────────────────────────────────
+
+    def _accept(self):
+        # Accepted photos stay exactly where they are — just move on.
+        cur = self._current()
+        if cur is None:
+            return
+        self._history.append(('accept', self._idx, None, None))
+        self._accepted += 1
+        self._undo_btn.configure(state='normal')
+        self._idx += 1
+        self._show_current()
+
+    def _reject(self):
+        # Rejects go into a 'rejects' subfolder NEXT TO the photo,
+        # so the date folder structure is preserved.
+        cur = self._current()
+        if cur is None:
+            return
+        dest_dir = cur.parent / self.REJECT_DIR
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / cur.name
+        n = 1
+        while dest.exists():
+            dest = dest_dir / f"{cur.stem}_{n}{cur.suffix}"
+            n += 1
+        try:
+            shutil.move(str(cur), str(dest))
+        except Exception as e:
+            messagebox.showerror("Move Failed", f"Could not move {cur.name}:\n{e}")
+            return
+        self._history.append(('reject', self._idx, cur, dest))
+        self._rejected += 1
+        self._undo_btn.configure(state='normal')
+        self._idx += 1
+        self._show_current()
+
+    def _undo(self):
+        if not self._history:
+            return
+        action, idx, orig, moved = self._history.pop()
+        if action == 'reject':
+            try:
+                shutil.move(str(moved), str(orig))
+            except Exception as e:
+                messagebox.showerror("Undo Failed", f"Could not move back {moved.name}:\n{e}")
+                self._history.append((action, idx, orig, moved))
+                return
+            self._rejected -= 1
+        else:
+            self._accepted -= 1
+        self._idx = idx
+        for b in (self._accept_btn, self._reject_btn):
+            b.configure(state='normal')
+        if not self._history:
+            self._undo_btn.configure(state='disabled')
+        self._show_current()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — Dedup
+# ══════════════════════════════════════════════════════════════════════════════
+
+class DedupTab(tk.Frame):
+    """
+    Find duplicate media files in a folder.
+    Suspects: files with identical size.
+    Verified: identical SHA256 hash (byte-for-byte same content).
+    Keeps the oldest copy of each group; deletes the rest only after confirmation.
+    """
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG)
+        self._src_var    = tk.StringVar()
+        self._status_var = tk.StringVar(value="Pick a folder and click Scan.")
+        self._prog_var   = tk.DoubleVar(value=0.0)
+        self._running          = False
+        self._cancel_requested = False
+        # list of (keeper Path, duplicate Path)
+        self._dupes: list = []
+        self._build()
+
+    def _build(self):
+        c = tk.Frame(self, bg=BG)
+        c.pack(fill='both', expand=True, padx=28, pady=18)
+
+        # Info banner
+        info = tk.Frame(c, bg='#1e2a1e', padx=14, pady=10)
+        info.pack(fill='x', pady=(0,14))
+        tk.Label(info,
+                 text="🛡  Suspected duplicates (same size) are verified byte-for-byte by SHA256 hash\n"
+                      "    before anything is deleted. The oldest copy of each group is always kept.",
+                 bg='#1e2a1e', fg=GREEN, font=UI, justify='left'
+                 ).pack(anchor='w')
+
+        # Path
+        pf = lf(c, "Folder")
+        pf.pack(fill='x', pady=(0,14))
+        pf.grid_columnconfigure(1, weight=1)
+        path_row(pf, "Folder to Deduplicate", self._src_var,
+                 lambda: self._browse(self._src_var, "Select Folder to Deduplicate"), 0)
+
+        # Progress
+        tk.Label(c, textvariable=self._status_var, bg=BG, fg=DIM,
+                 font=UI, anchor='w').pack(fill='x', pady=(0,4))
+        style = ttk.Style()
+        style.configure("DD.Horizontal.TProgressbar",
+                        troughcolor=PANEL, background=YELLOW,
+                        bordercolor=PANEL, lightcolor=YELLOW, darkcolor=YELLOW)
+        ttk.Progressbar(c, variable=self._prog_var, maximum=100,
+                        style="DD.Horizontal.TProgressbar"
+                        ).pack(fill='x', pady=(0,10))
+
+        # Results
+        rf = lf(c, "Verified Duplicates")
+        rf.pack(fill='both', expand=True, pady=(0,14))
+        cols = ('keep', 'dupe', 'size', 'status')
+        self._tree = ttk.Treeview(rf, columns=cols, show='headings', selectmode='none')
+        self._tree.heading('keep',   text='Keeping (oldest)')
+        self._tree.heading('dupe',   text='Duplicate to Delete')
+        self._tree.heading('size',   text='Size')
+        self._tree.heading('status', text='Status')
+        self._tree.column('keep',   width=280, anchor='w')
+        self._tree.column('dupe',   width=280, anchor='w')
+        self._tree.column('size',   width=80,  anchor='e')
+        self._tree.column('status', width=100, anchor='center')
+        self._tree.tag_configure('matched', foreground=GREEN)
+        self._tree.tag_configure('deleted', foreground=ORANGE)
+        vsb = ttk.Scrollbar(rf, orient='vertical', command=self._tree.yview)
+        self._tree.configure(yscrollcommand=vsb.set)
+        self._tree.pack(side='left', fill='both', expand=True, padx=(4,0), pady=4)
+        vsb.pack(side='right', fill='y', pady=4, padx=(0,4))
+
+        # Log
+        lframe = lf(c, "Activity Log")
+        lframe.pack(fill='x', pady=(0,14))
+        self._log = make_log(lframe)
+        self._log.configure(height=7)
+        self._log.pack(fill='x', padx=4, pady=4)
+
+        # Buttons
+        br = tk.Frame(c, bg=BG)
+        br.pack(fill='x')
+        self._scan_btn = tk.Button(br, text="🔍  SCAN FOR DUPLICATES",
+                                   command=self._start_scan,
+                                   bg=BLUE, fg=BG,
+                                   activebackground='#7bbfe8', activeforeground=BG,
+                                   relief='flat', font=SEMIBOLD,
+                                   cursor='hand2', padx=20, pady=8)
+        self._scan_btn.pack(side='left')
+        self._cancel_btn = tk.Button(br, text="✕  CANCEL",
+                                     command=self._cancel,
+                                     bg=RED, fg=BG,
+                                     activebackground='#f07070', activeforeground=BG,
+                                     relief='flat', font=SEMIBOLD,
+                                     cursor='hand2', padx=16, pady=8,
+                                     state='disabled')
+        self._cancel_btn.pack(side='left', padx=(10,0))
+        self._del_btn = tk.Button(br, text="🗑  DELETE DUPLICATES",
+                                  command=self._confirm_delete,
+                                  bg=ORANGE, fg=BG,
+                                  activebackground='#f0a060', activeforeground=BG,
+                                  relief='flat', font=SEMIBOLD,
+                                  cursor='hand2', padx=20, pady=8,
+                                  state='disabled')
+        self._del_btn.pack(side='left', padx=(10,0))
+        tk.Button(br, text="Clear Log",
+                  command=lambda: (self._log.configure(state='normal'),
+                                   self._log.delete('1.0','end'),
+                                   self._log.configure(state='disabled')),
+                  bg=PANEL, fg=DIM, activebackground=BG,
+                  relief='flat', font=UI, cursor='hand2', padx=14, pady=8
+                  ).pack(side='left', padx=(10,0))
+
+    def _browse(self, var, title):
+        p = filedialog.askdirectory(title=title)
+        if p: var.set(p)
+
+    def log(self, msg, tag='info'):
+        wlog(self._log, msg, tag)
+
+    def _cancel(self):
+        if self._running:
+            self._cancel_requested = True
+            self._cancel_btn.configure(state='disabled', text="Cancelling…")
+
+    # ── Scan ──────────────────────────────────────────────────────────────────
+
+    def _start_scan(self):
+        if self._running: return
+        src = self._src_var.get().strip()
+        if not src:
+            messagebox.showerror("Missing Path", "Please pick a folder to scan.")
+            return
+        src_p = Path(src)
+        if not src_p.exists():
+            messagebox.showerror("Not Found", f"Folder not found:\n{src}")
+            return
+        for row in self._tree.get_children():
+            self._tree.delete(row)
+        self._dupes.clear()
+        self._del_btn.configure(state='disabled')
+        self._prog_var.set(0)
+        self._running = True
+        self._cancel_requested = False
+        self._scan_btn.configure(state='disabled', text="⏳  Scanning…")
+        self._cancel_btn.configure(state='normal', text="✕  CANCEL")
+        threading.Thread(target=self._run_scan, args=(src_p,), daemon=True).start()
+
+    def _run_scan(self, src_p: Path):
+        log = self.log
+        try:
+            log("═"*60, 'accent')
+            log(f"Folder : {src_p}", 'accent')
+            log("═"*60, 'accent')
+
+            self._status_var.set("Scanning files…")
+            files = scan_media(src_p)
+            log(f"Found {len(files)} media file(s).", 'dim')
+
+            # Phase 1 — group by size (cheap). Same size = suspected duplicate.
+            by_size: dict = {}
+            for f in files:
+                try:
+                    by_size.setdefault(f.stat().st_size, []).append(f)
+                except OSError:
+                    pass
+            suspect_groups = [g for g in by_size.values() if len(g) > 1]
+            suspects = sum(len(g) for g in suspect_groups)
+            log(f"{len(suspect_groups)} group(s) of same-size files "
+                f"({suspects} file(s)) — verifying by hash…", 'dim')
+            if not suspect_groups:
+                self._prog_var.set(100)
+                self._status_var.set("No duplicates found.")
+                log("No suspected duplicates.", 'ok')
+                return
+
+            # Phase 2 — hash the suspects to verify true duplicates
+            cache = _load_cache()
+            done = [0]
+            lock = threading.Lock()
+
+            def hash_one(f: Path):
+                if self._cancel_requested:
+                    return (f, None)
+                try:
+                    # Videos (incl. .insv): quick head+tail fingerprint instead
+                    # of hashing the whole multi-GB file.
+                    if f.suffix.lower() in VIDEO_EXT:
+                        h = video_fingerprint(f)
+                    else:
+                        h = sha256_cached(f, cache)
+                except OSError as e:
+                    log(f"  ⚠  Could not hash {f.name}: {e}", 'warn')
+                    return (f, None)
+                with lock:
+                    done[0] += 1
+                    n = done[0]
+                self._prog_var.set(n / suspects * 100)
+                self._status_var.set(f"Hashing {n}/{suspects}: {f.name}")
+                return (f, h)
+
+            verified = 0
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                for group in suspect_groups:
+                    if self._cancel_requested:
+                        break
+                    by_hash: dict = {}
+                    for f, h in pool.map(hash_one, group):
+                        if h:
+                            by_hash.setdefault(h, []).append(f)
+                    for same in by_hash.values():
+                        if len(same) < 2:
+                            continue
+                        # Keep the oldest copy; the rest are deletable dupes
+                        same.sort(key=lambda f: (f.stat().st_mtime, str(f).lower()))
+                        keeper = same[0]
+                        status = ('✓ Video match'
+                                  if keeper.suffix.lower() in VIDEO_EXT
+                                  else '✓ Verified')
+                        for dupe in same[1:]:
+                            self._dupes.append((keeper, dupe))
+                            verified += 1
+                            sz = SafeDeleteTab._fmt_size(dupe.stat().st_size)
+                            self.after(0, lambda k=keeper, d=dupe, sz=sz, st=status:
+                                       self._tree.insert('', 'end',
+                                           values=(str(k.relative_to(src_p)),
+                                                   str(d.relative_to(src_p)),
+                                                   sz, st),
+                                           tags=('matched',)))
+                            log(f"  ✓ {dupe.relative_to(src_p)}  =  "
+                                f"{keeper.relative_to(src_p)}", 'ok')
+            _save_cache(cache)
+
+            self._prog_var.set(100)
+            if self._cancel_requested:
+                log("Scan cancelled by user.", 'warn')
+                self._status_var.set(f"Cancelled — {verified} duplicate(s) found so far.")
+            else:
+                log("─"*60, 'dim')
+                log(f"Scan complete — {verified} verified duplicate(s).",
+                    'orange' if verified else 'ok')
+                self._status_var.set(
+                    f"Done: {verified} verified duplicate(s)."
+                    if verified else "No duplicates found.")
+            if self._dupes:
+                self.after(0, lambda: self._del_btn.configure(state='normal'))
+
+        except Exception as e:
+            import traceback
+            log(f"\n✗ Unexpected error: {e}", 'error')
+            log(traceback.format_exc(), 'error')
+            self._status_var.set("Error — see log.")
+        finally:
+            self._running = False
+            self._cancel_requested = False
+            self.after(0, lambda: self._scan_btn.configure(
+                state='normal', text="🔍  SCAN FOR DUPLICATES"))
+            self.after(0, lambda: self._cancel_btn.configure(
+                state='disabled', text="✕  CANCEL"))
+
+    # ── Delete ────────────────────────────────────────────────────────────────
+
+    def _confirm_delete(self):
+        n = len(self._dupes)
+        if n == 0:
+            messagebox.showinfo("Nothing to Delete", "No duplicates to delete.")
+            return
+        total = sum(d.stat().st_size for _, d in self._dupes if d.exists())
+        ans = messagebox.askyesno(
+            "Confirm Delete Duplicates",
+            f"This will permanently delete {n} duplicate file(s) "
+            f"({SafeDeleteTab._fmt_size(total)}).\n\n"
+            "Each was verified byte-for-byte identical (SHA256) to a copy "
+            "that will be kept.\n\nProceed?",
+            icon='warning')
+        if not ans:
+            return
+        log = self.log
+        log("─"*60, 'dim')
+        deleted = errors = 0
+        items = self._tree.get_children()
+        for idx, (keeper, dupe) in enumerate(self._dupes):
+            try:
+                delete_file(dupe)
+                deleted += 1
+                log(f"  🗑  Deleted: {dupe.name}", 'ok')
+                if idx < len(items):
+                    vals = list(self._tree.item(items[idx])['values'])
+                    vals[3] = '🗑 Deleted'
+                    self._tree.item(items[idx], values=vals, tags=('deleted',))
+            except Exception as e:
+                errors += 1
+                log(f"  ✗ Could not delete {dupe.name}: {e}", 'error')
+        self._dupes.clear()
+        self._del_btn.configure(state='disabled')
+        log(f"Done — {deleted} deleted, {errors} error(s).",
+            'orange' if not errors else 'warn')
+        self._status_var.set(f"Dedup complete: {deleted} removed, {errors} errors.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1088,9 +1938,20 @@ class App(tk.Tk):
 
         self._ingest_tab = IngestTab(nb)
         self._safe_tab   = SafeDeleteTab(nb)
+        self._lowres_tab = LowResTab(nb)
+        self._weed_tab   = WeedTab(nb)
+        self._dedup_tab  = DedupTab(nb)
 
         nb.add(self._ingest_tab, text="  ▶  Ingest  ")
         nb.add(self._safe_tab,   text="  🛡  Safe Delete  ")
+        nb.add(self._lowres_tab, text="  🖼  Low-Res  ")
+        nb.add(self._weed_tab,   text="  🌱  Weed  ")
+        nb.add(self._dedup_tab,  text="  ♊  Dedup  ")
+
+        # Give the Weed tab keyboard focus when selected so shortcuts work
+        nb.bind('<<NotebookTabChanged>>',
+                lambda e: self._weed_tab.focus_set()
+                if nb.select() == str(self._weed_tab) else None)
 
     def _check_deps(self):
         log = self._ingest_tab.log
