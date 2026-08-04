@@ -1389,6 +1389,7 @@ class WeedTab(tk.Frame):
         self._photo_ref  = None     # keep ImageTk reference alive
         self._accepted = 0
         self._rejected = 0
+        self._fullscreen = False
         self._build()
 
     def _build(self):
@@ -1401,10 +1402,12 @@ class WeedTab(tk.Frame):
         pf.grid_columnconfigure(1, weight=1)
         path_row(pf, "Photos Folder to Weed", self._src_var,
                  lambda: self._browse(self._src_var, "Select Folder to Weed"), 0)
+        self._path_frame = pf
 
         # Status row
         sr = tk.Frame(c, bg=BG)
         sr.pack(fill='x', pady=(0,6))
+        self._status_row = sr
         tk.Label(sr, textvariable=self._status_var, bg=BG, fg=DIM,
                  font=UI, anchor='w').pack(side='left')
         tk.Label(sr, textvariable=self._count_var, bg=BG, fg=BLUE,
@@ -1418,12 +1421,16 @@ class WeedTab(tk.Frame):
         self._canvas.bind('<Button-1>', lambda e: self.focus_set())
 
         # Keyboard shortcuts hint
-        tk.Label(c, text="↑ / A = Accept (stays in place)      ↓ / R = Reject (→ rejects subfolder)      ← / U = Undo",
-                 bg=BG, fg=DIM, font=UI).pack(pady=(0,8))
+        self._hint_label = tk.Label(
+            c, text="↑ / A = Accept (stays in place)      ↓ / R = Reject (→ rejects subfolder)      "
+                    "← / U = Undo      F / F11 = Fullscreen      Esc = Exit fullscreen",
+            bg=BG, fg=DIM, font=UI)
+        self._hint_label.pack(pady=(0,8))
 
         # Buttons
         br = tk.Frame(c, bg=BG)
         br.pack(fill='x')
+        self._btn_row = br
         self._start_btn = tk.Button(br, text="▶  START WEEDING",
                                     command=self._start,
                                     bg=BLUE, fg=BG,
@@ -1458,11 +1465,45 @@ class WeedTab(tk.Frame):
                                    state='disabled')
         self._undo_btn.pack(side='left', padx=(10,0))
 
+        tk.Button(br, text="⛶  FULLSCREEN",
+                  command=self._toggle_fullscreen,
+                  bg=PANEL, fg=BLUE, activebackground=BG,
+                  relief='flat', font=SEMIBOLD,
+                  cursor='hand2', padx=16, pady=8
+                  ).pack(side='right')
+
         # Key bindings (only act while a weeding session is active)
         for key, fn in (('<Up>',    self._accept), ('a', self._accept), ('A', self._accept),
                         ('<Down>',  self._reject), ('r', self._reject), ('R', self._reject),
-                        ('<Left>',  self._undo),   ('u', self._undo), ('U', self._undo)):
+                        ('<Left>',  self._undo),   ('u', self._undo), ('U', self._undo),
+                        ('f', self._toggle_fullscreen), ('F', self._toggle_fullscreen),
+                        ('<F11>',    self._toggle_fullscreen),
+                        ('<Escape>', self._exit_fullscreen)):
             self.bind(key, lambda e, fn=fn: fn())
+
+    # ── Fullscreen ────────────────────────────────────────────────────────────
+
+    def _set_fullscreen(self, on: bool):
+        self._fullscreen = on
+        self.winfo_toplevel().attributes('-fullscreen', on)
+        if on:
+            # Hide the chrome around the photo so it gets the whole screen
+            for w in (self._path_frame, self._hint_label, self._btn_row):
+                w.pack_forget()
+        else:
+            # Restore original layout order
+            self._path_frame.pack(fill='x', pady=(0,10), before=self._status_row)
+            self._hint_label.pack(pady=(0,8), after=self._canvas)
+            self._btn_row.pack(fill='x')
+        self.focus_set()
+        self._show_current()
+
+    def _toggle_fullscreen(self):
+        self._set_fullscreen(not self._fullscreen)
+
+    def _exit_fullscreen(self):
+        if self._fullscreen:
+            self._set_fullscreen(False)
 
     def _browse(self, var, title):
         p = filedialog.askdirectory(title=title)
