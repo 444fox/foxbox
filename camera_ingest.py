@@ -120,22 +120,30 @@ def sha256_cached(path: Path, cache: dict) -> str:
     return h
 
 
-def video_fingerprint(path: Path) -> str:
+def quick_fingerprint(path: Path) -> str:
     """
-    Quick identity check for large video files (MP4/MOV/INSV…): hash of the
-    first and last 1 MB plus the size. Avoids reading multi-GB files in full;
-    combined with the same-size prefilter it is a very strong match signal.
+    Fast identity check: SHA256 of the first, middle, and last 1 MB plus the
+    exact size. Reads at most 3 MB regardless of file size — combined with a
+    same-size/same-name prefilter it is a very strong match signal without
+    reading multi-GB files in full.
     """
     h = hashlib.sha256()
     size = path.stat().st_size
     chunk = 1 << 20
     with open(path, 'rb') as f:
         h.update(f.read(chunk))
+        if size > 3 * chunk:
+            f.seek(size // 2)
+            h.update(f.read(chunk))
         if size > 2 * chunk:
             f.seek(size - chunk)
             h.update(f.read(chunk))
     h.update(str(size).encode())
-    return 'vfp:' + h.hexdigest()
+    return 'qfp:' + h.hexdigest()
+
+
+# Back-compat alias (videos and photos now share the same fingerprint)
+video_fingerprint = quick_fingerprint
 
 
 def get_capture_time(path: Path):
@@ -522,8 +530,8 @@ class SafeDeleteTab(tk.Frame):
         info = tk.Frame(c, bg='#1e2a1e', padx=14, pady=10)
         info.pack(fill='x', pady=(0,14))
         tk.Label(info,
-                 text="🛡  Safe Delete compares files by content (SHA256 hash), not filename.\n"
-                      "    Files are only removed from the SD card once a byte-perfect copy is confirmed on the server.",
+                 text="🛡  Safe Delete compares files by content (sampled SHA256 fingerprint: size +\n"
+                      "    first/middle/last 1 MB). Files are only removed from the SD card once a matching copy is confirmed.",
                  bg='#1e2a1e', fg=GREEN, font=UI, justify='left'
                  ).pack(anchor='w')
 
@@ -813,16 +821,18 @@ class SafeDeleteTab(tk.Frame):
                         log(f"  ✓ {sd_f.name}  →  {rel}  (name+size match)", 'ok')
                         return
 
-                    # ── Photos/other: full hash verification ───────────────────
-                    h_sd = sha256_file(sd_f)
+                    # ── Photos/other: sampled fingerprint verification ─────────
+                    # (first + middle + last 1 MB + size — reads ≤3 MB per file)
+                    h_sd = quick_fingerprint(sd_f)
 
-                    # Hash server file — use cache if size+mtime unchanged
+                    # Fingerprint server file — use cache if size+mtime unchanged
                     key   = str(srv_f)
                     entry = cache.get(key)
                     cached = (entry and
+                              str(entry.get('hash', '')).startswith('qfp:') and
                               entry.get('size') == srv_size and
                               abs(entry.get('mtime', 0) - srv_stat.st_mtime) < 1.0)
-                    h_srv = entry['hash'] if cached else sha256_file(srv_f)
+                    h_srv = entry['hash'] if cached else quick_fingerprint(srv_f)
                     if not cached:
                         with lock:
                             cache[key] = {'hash': h_srv,
@@ -953,6 +963,7 @@ class SafeDeleteTab(tk.Frame):
                         st  = sf.stat()
                         entry = cache.get(key)
                         cached = (entry and
+                                  str(entry.get('hash', '')).startswith('qfp:') and
                                   entry.get('size') == st.st_size and
                                   abs(entry.get('mtime', 0) - st.st_mtime) < 1.0)
                         if cached:
@@ -960,7 +971,7 @@ class SafeDeleteTab(tk.Frame):
                             with lock:
                                 cache_hits[0] += 1
                         else:
-                            h = sha256_file(sf)
+                            h = quick_fingerprint(sf)
                             with lock:
                                 cache[key] = {'hash': h,
                                               'size': st.st_size,
@@ -995,8 +1006,8 @@ class SafeDeleteTab(tk.Frame):
                         return
                     nonlocal matched, unmatched
                     try:
-                        # Reuse hash if already computed in phase 3
-                        h = precomputed.get(sd_f) or sha256_file(sd_f)
+                        # Reuse fingerprint if already computed in phase 3
+                        h = precomputed.get(sd_f) or quick_fingerprint(sd_f)
                         sz = self._fmt_size(sd_f.stat().st_size)
                         with lock:
                             fb_done[0] += 1
@@ -1076,7 +1087,8 @@ class SafeDeleteTab(tk.Frame):
         ans = messagebox.askyesno(
             "Confirm Safe Delete",
             f"This will permanently delete {n} file(s) from the SD card.\n\n"
-            "Each file has been confirmed to exist on the server by SHA256 hash.\n\n"
+            "Each file has been confirmed to exist on the server by content\n"
+            "fingerprint (size + sampled SHA256).\n\n"
             "Proceed?",
             icon='warning')
         if ans:
