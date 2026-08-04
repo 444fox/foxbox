@@ -288,7 +288,6 @@ def lf(parent, title):
 class IngestTab(tk.Frame):
     def __init__(self, parent):
         super().__init__(parent, bg=BG)
-        self._sd_var      = tk.StringVar()
         self._local_var   = tk.StringVar()
         self._remote_var  = tk.StringVar()
         self._status_var  = tk.StringVar(value="Ready.")
@@ -297,22 +296,42 @@ class IngestTab(tk.Frame):
         self._subdir_var  = tk.BooleanVar(value=True)
         self._running     = False
         self._names: set  = set()
+        # Source queue — more cards can be plugged in and added while running
+        self._source_queue: list = []
+        self._queue_lock  = threading.Lock()
         self._build()
 
     def _build(self):
         c = tk.Frame(self, bg=BG)
         c.pack(fill='both', expand=True, padx=28, pady=18)
 
-        # Paths
-        pf = lf(c, "Paths")
+        # Sources (queue — add several cards, next one runs automatically)
+        sf = lf(c, "Sources — queued cards run one after another")
+        sf.pack(fill='x', pady=(0,14))
+        sf.grid_columnconfigure(0, weight=1)
+        self._src_list = tk.Listbox(sf, height=3, bg='#2c3140', fg=TEXT,
+                                    relief='flat', font=UI,
+                                    selectbackground=BLUE, selectforeground=BG,
+                                    highlightthickness=0)
+        self._src_list.grid(row=0, column=0, rowspan=2, padx=(12,6), pady=6, sticky='ew')
+        tk.Button(sf, text="🔌  ADD CARD…", command=self._add_source,
+                  bg=GREEN, fg=BG, activebackground='#6fd09d', activeforeground=BG,
+                  relief='flat', font=SEMIBOLD, cursor='hand2', padx=12, pady=4
+                  ).grid(row=0, column=1, padx=(0,12), pady=(6,2), sticky='ew')
+        self._rm_src_btn = tk.Button(sf, text="➖  Remove", command=self._remove_source,
+                  bg=BG, fg=DIM, activebackground=BLUE, activeforeground=BG,
+                  relief='flat', font=UI, cursor='hand2', padx=12, pady=3)
+        self._rm_src_btn.grid(row=1, column=1, padx=(0,12), pady=(2,6), sticky='ew')
+
+        # Destinations
+        pf = lf(c, "Destinations")
         pf.pack(fill='x', pady=(0,14))
         pf.grid_columnconfigure(1, weight=1)
-        path_row(pf, "SD Card / Source",           self._sd_var,     lambda: self._browse(self._sd_var,     "Select SD Card Root"),           0)
-        path_row(pf, "Local USB Destination",       self._local_var,  lambda: self._browse(self._local_var,  "Select Local USB Destination"),   1)
-        path_row(pf, "Remote Server Destination",   self._remote_var, lambda: self._browse(self._remote_var, "Select Remote Server Destination"),2)
+        path_row(pf, "Local USB Destination",       self._local_var,  lambda: self._browse(self._local_var,  "Select Local USB Destination"),   0)
+        path_row(pf, "Remote Server Destination",   self._remote_var, lambda: self._browse(self._remote_var, "Select Remote Server Destination"),1)
         tk.Label(pf, text="Leave a destination blank to skip it — at least one is required.",
                  font=UI, bg=PANEL, fg=DIM
-                 ).grid(row=3, column=0, columnspan=3, padx=12, pady=(0,6), sticky='w')
+                 ).grid(row=2, column=0, columnspan=3, padx=12, pady=(0,6), sticky='w')
 
         # Options
         of = lf(c, "Options")
@@ -368,38 +387,112 @@ class IngestTab(tk.Frame):
     def log(self, msg, tag='info'):
         wlog(self._log, msg, tag)
 
+    # ── Source queue ──────────────────────────────────────────────────────────
+
+    def _add_source(self):
+        p = filedialog.askdirectory(title="Select SD Card / Source to Queue")
+        if not p:
+            return
+        with self._queue_lock:
+            if p in self._source_queue:
+                messagebox.showinfo("Already Queued", f"Already in the queue:\n{p}")
+                return
+            self._source_queue.append(p)
+        self._src_list.insert('end', p)
+        if self._running:
+            self.log(f"🔌 Queued next source: {p}", 'accent')
+
+    def _remove_source(self):
+        sel = self._src_list.curselection()
+        if not sel:
+            return
+        value = self._src_list.get(sel[0])
+        with self._queue_lock:
+            if value in self._source_queue:
+                self._source_queue.remove(value)
+                self._src_list.delete(sel[0])
+
+    def _pop_source(self):
+        """Take the next queued source (thread-safe). Returns Path or None."""
+        with self._queue_lock:
+            while self._source_queue:
+                p = self._source_queue.pop(0)
+                self.after(0, lambda v=p: self._remove_listbox_entry(v))
+                sd_p = Path(p)
+                if sd_p.exists():
+                    return sd_p
+                self.log(f"⚠  Source not found — skipped: {p}", 'warn')
+        return None
+
+    def _remove_listbox_entry(self, value):
+        items = self._src_list.get(0, 'end')
+        for i, v in enumerate(items):
+            if v == value:
+                self._src_list.delete(i)
+                break
+
+    # ── Run ───────────────────────────────────────────────────────────────────
+
     def _start(self):
         if self._running: return
-        sd, local, remote = (self._sd_var.get().strip(),
-                             self._local_var.get().strip(),
-                             self._remote_var.get().strip())
-        if not sd:
-            messagebox.showerror("Missing Paths", "Please set the SD card / source path.")
+        local, remote = (self._local_var.get().strip(),
+                         self._remote_var.get().strip())
+        with self._queue_lock:
+            has_sources = bool(self._source_queue)
+        if not has_sources:
+            messagebox.showerror("No Sources",
+                                 "Queue at least one SD card / source with 🔌 ADD CARD.")
             return
         if not local and not remote:
             messagebox.showerror("Missing Paths",
                                  "Please set at least one destination (local USB or remote server).")
-            return
-        sd_p = Path(sd)
-        if not sd_p.exists():
-            messagebox.showerror("Not Found", f"SD card path not found:\n{sd}")
             return
         self._running = True
         self._start_btn.configure(state='disabled', text="⏳  Running…")
         self._names.clear()
         self._prog_var.set(0)
         threading.Thread(target=self._run,
-                         args=(sd_p,
-                               Path(local) if local else None,
+                         args=(Path(local) if local else None,
                                Path(remote) if remote else None),
                          daemon=True).start()
 
-    def _run(self, sd_p, local_p, remote_p):
+    def _run(self, local_p, remote_p):
+        log = self.log
+        totals = {'success': 0, 'failed': 0, 'duplicates': 0, 'sources': 0}
+        try:
+            while True:
+                sd_p = self._pop_source()
+                if sd_p is None:
+                    break
+                totals['sources'] += 1
+                self._process_source(sd_p, local_p, remote_p, totals)
+            log("\n" + "═"*60, 'accent')
+            log(f"ALL SOURCES DONE  —  {totals['sources']} source(s): "
+                f"{totals['success']} succeeded, {totals['duplicates']} duplicate(s) skipped, "
+                f"{totals['failed']} failed",
+                'ok' if not totals['failed'] else 'warn')
+            self._status_var.set(
+                f"Complete: {totals['sources']} source(s), "
+                f"{totals['success']} transferred, {totals['failed']} failed.")
+        except Exception as e:
+            import traceback
+            log(f"\n✗ Unexpected error: {e}", 'error')
+            log(traceback.format_exc(), 'error')
+            self._status_var.set("Error — see log.")
+        finally:
+            self._running = False
+            self.after(0, lambda: self._start_btn.configure(
+                state='normal', text="▶  START INGEST"))
+
+    def _process_source(self, sd_p, local_p, remote_p, totals):
         log = self.log
         do_del = self._delete_var.get()
         do_sub = self._subdir_var.get()
+        success, failed = [], []
+        duplicates = 0
         try:
-            self._status_var.set("Scanning SD card…")
+            self._prog_var.set(0)
+            self._status_var.set(f"Scanning {sd_p}…")
             log("═"*60, 'accent')
             log(f"Source      : {sd_p}", 'accent')
             log(f"Local dest  : {local_p if local_p else '— skipped —'}", 'accent')
@@ -418,9 +511,7 @@ class IngestTab(tk.Frame):
             timed.sort(key=lambda x: (x[1] is None, x[1] or datetime.min, x[0].name))
 
             total = len(timed)
-            success, failed = [], []
             seen_hashes: dict = {}   # content hash -> dest name already copied
-            duplicates = 0
 
             for i, (src, ct) in enumerate(timed, 1):
                 self._prog_var.set((i-1)/total*100)
@@ -481,23 +572,21 @@ class IngestTab(tk.Frame):
 
             self._prog_var.set(100)
             log("\n"+"═"*60, 'accent')
-            log(f"DONE  —  {len(success)} succeeded, {duplicates} duplicate(s) skipped, "
+            log(f"SOURCE DONE  —  {len(success)} succeeded, {duplicates} duplicate(s) skipped, "
                 f"{len(failed)} failed",
                 'ok' if not failed else 'warn')
             if failed:
                 log("Files NOT deleted (copy error):", 'error')
                 for f in failed: log(f"  • {f}", 'error')
-            self._status_var.set(f"Complete: {len(success)}/{total} transferred.")
 
         except Exception as e:
             import traceback
-            log(f"\n✗ Unexpected error: {e}", 'error')
+            log(f"\n✗ Unexpected error on {sd_p}: {e}", 'error')
             log(traceback.format_exc(), 'error')
-            self._status_var.set("Error — see log.")
         finally:
-            self._running = False
-            self.after(0, lambda: self._start_btn.configure(
-                state='normal', text="▶  START INGEST"))
+            totals['success']    += len(success)
+            totals['failed']     += len(failed)
+            totals['duplicates'] += duplicates
 
 
 # ══════════════════════════════════════════════════════════════════════════════
