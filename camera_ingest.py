@@ -1374,8 +1374,11 @@ class WeedTab(tk.Frame):
       ↓ / R  = reject  (moved to a 'rejects' subfolder next to the photo,
                         so the date structure is preserved)
       ← / U  = undo last accept/reject
+    Progress is saved after every action, so you can close the app and
+    resume the same folder where you left off.
     """
     REJECT_DIR = 'rejects'
+    STATE_FILE = Path(__file__).parent / '.weed_sessions.json'
 
     def __init__(self, parent):
         super().__init__(parent, bg=BG)
@@ -1509,6 +1512,36 @@ class WeedTab(tk.Frame):
         p = filedialog.askdirectory(title=title)
         if p: var.set(p)
 
+    # ── Saved-session state ───────────────────────────────────────────────────
+
+    def _load_states(self) -> dict:
+        try:
+            if self.STATE_FILE.exists():
+                with open(self.STATE_FILE, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {}
+
+    def _save_state(self):
+        """Persist current position after every action (or clear when done)."""
+        src = self._src_var.get().strip()
+        if not src:
+            return
+        states = self._load_states()
+        cur = self._current()
+        if cur is None:
+            states.pop(src, None)        # session finished — forget it
+        else:
+            states[src] = {'next': str(cur),
+                           'accepted': self._accepted,
+                           'rejected': self._rejected}
+        try:
+            with open(self.STATE_FILE, 'w', encoding='utf-8') as f:
+                json.dump(states, f)
+        except Exception:
+            pass
+
     # ── Session ───────────────────────────────────────────────────────────────
 
     def _start(self):
@@ -1540,6 +1573,26 @@ class WeedTab(tk.Frame):
         self._history  = []
         self._accepted = 0
         self._rejected = 0
+
+        # Offer to resume a previous session on this folder
+        state = self._load_states().get(src)
+        if state:
+            nxt = str(state.get('next', '')).lower()
+            resume_idx = next((i for i, f in enumerate(photos)
+                               if str(f).lower() >= nxt), None)
+            if resume_idx is not None and resume_idx > 0:
+                if messagebox.askyesno(
+                        "Resume Weeding?",
+                        f"You have an unfinished session on this folder\n"
+                        f"({state.get('accepted', 0)} accepted, "
+                        f"{state.get('rejected', 0)} rejected, "
+                        f"{len(photos) - resume_idx} photo(s) left).\n\n"
+                        "Resume where you left off?\n"
+                        "(No = start over from the first photo)"):
+                    self._idx      = resume_idx
+                    self._accepted = int(state.get('accepted', 0))
+                    self._rejected = int(state.get('rejected', 0))
+
         self._active   = True
         for b in (self._accept_btn, self._reject_btn):
             b.configure(state='normal')
@@ -1600,6 +1653,7 @@ class WeedTab(tk.Frame):
         self._accepted += 1
         self._undo_btn.configure(state='normal')
         self._idx += 1
+        self._save_state()
         self._show_current()
 
     def _reject(self):
@@ -1624,6 +1678,7 @@ class WeedTab(tk.Frame):
         self._rejected += 1
         self._undo_btn.configure(state='normal')
         self._idx += 1
+        self._save_state()
         self._show_current()
 
     def _undo(self):
@@ -1645,6 +1700,7 @@ class WeedTab(tk.Frame):
             b.configure(state='normal')
         if not self._history:
             self._undo_btn.configure(state='disabled')
+        self._save_state()
         self._show_current()
 
 
