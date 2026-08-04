@@ -1482,6 +1482,13 @@ class WeedTab(tk.Frame):
         self._accepted = 0
         self._rejected = 0
         self._fullscreen = False
+        # Zoom / pan state (scroll wheel to zoom, drag to pan)
+        self._orig_img   = None     # full-res PIL image of current photo
+        self._shown_path = None
+        self._zoom       = 1.0      # 1.0 = fit to canvas
+        self._view_cx    = None     # view center in image coords
+        self._view_cy    = None
+        self._drag_last  = None
         self._build()
 
     def _build(self):
@@ -1510,12 +1517,14 @@ class WeedTab(tk.Frame):
                                  highlightbackground=DIM)
         self._canvas.pack(fill='both', expand=True, pady=(0,10))
         self._canvas.bind('<Configure>', lambda e: self._show_current())
-        self._canvas.bind('<Button-1>', lambda e: self.focus_set())
+        self._canvas.bind('<Button-1>', self._on_press)
+        self._canvas.bind('<B1-Motion>', self._on_drag)
+        self._canvas.bind('<MouseWheel>', self._on_wheel)
 
         # Keyboard shortcuts hint
         self._hint_label = tk.Label(
             c, text="↑ / A = Accept (stays in place)      ↓ / R = Reject (→ rejects subfolder)      "
-                    "← / U = Undo      F / F11 = Fullscreen      Esc = Exit fullscreen",
+                    "← / U = Undo      Scroll = Zoom (drag to pan)      F / F11 = Fullscreen      Esc = Exit",
             bg=BG, fg=DIM, font=UI)
         self._hint_label.pack(pady=(0,8))
 
@@ -1719,17 +1728,97 @@ class WeedTab(tk.Frame):
         self._status_var.set(str(cur.relative_to(Path(self._src_var.get().strip()))))
         if cw < 20 or ch < 20:
             return
-        try:
-            with Image.open(cur) as img:
-                img = ImageOps.exif_transpose(img)
-                img.thumbnail((cw - 8, ch - 8), Image.LANCZOS)
-                self._photo_ref = ImageTk.PhotoImage(img)
-            self._canvas.create_image(cw//2, ch//2, image=self._photo_ref)
-        except Exception as e:
+
+        # New photo → load full-res once and reset zoom/pan
+        if cur != self._shown_path:
+            self._shown_path = cur
+            self._zoom = 1.0
+            self._view_cx = self._view_cy = None
+            try:
+                with Image.open(cur) as img:
+                    self._orig_img = ImageOps.exif_transpose(img).copy()
+            except Exception as e:
+                self._orig_img = None
+                self._canvas.create_text(cw//2, ch//2,
+                                         text=f"⚠  Cannot preview\n{cur.name}\n{e}\n\n"
+                                              "You can still Accept / Reject it.",
+                                         fill=YELLOW, font=UI, justify='center')
+                return
+        if self._orig_img is None:
             self._canvas.create_text(cw//2, ch//2,
-                                     text=f"⚠  Cannot preview\n{cur.name}\n{e}\n\n"
+                                     text=f"⚠  Cannot preview\n{cur.name}\n\n"
                                           "You can still Accept / Reject it.",
                                      fill=YELLOW, font=UI, justify='center')
+            return
+        self._render(cw, ch)
+
+    # ── Zoom / pan ────────────────────────────────────────────────────────────
+
+    def _render(self, cw=None, ch=None):
+        """Draw the current photo at the current zoom/pan."""
+        img = self._orig_img
+        if img is None:
+            return
+        if cw is None:
+            cw, ch = self._canvas.winfo_width(), self._canvas.winfo_height()
+        iw, ih = img.size
+        fit = min((cw - 8) / iw, (ch - 8) / ih)
+        scale = fit * self._zoom
+        # Visible region of the original, centered on the view center
+        vis_w = min(iw, cw / scale)
+        vis_h = min(ih, ch / scale)
+        if self._view_cx is None:
+            self._view_cx, self._view_cy = iw / 2, ih / 2
+        # Clamp the center so the view box stays inside the image
+        self._view_cx = min(max(self._view_cx, vis_w / 2), iw - vis_w / 2)
+        self._view_cy = min(max(self._view_cy, vis_h / 2), ih - vis_h / 2)
+        box = (int(self._view_cx - vis_w / 2), int(self._view_cy - vis_h / 2),
+               int(self._view_cx + vis_w / 2), int(self._view_cy + vis_h / 2))
+        view = img.crop(box).resize((max(1, int(vis_w * scale)),
+                                     max(1, int(vis_h * scale))),
+                                    Image.LANCZOS)
+        self._photo_ref = ImageTk.PhotoImage(view)
+        self._canvas.delete('all')
+        self._canvas.create_image(cw // 2, ch // 2, image=self._photo_ref)
+        if self._zoom > 1.0:
+            self._canvas.create_text(10, 10, anchor='nw',
+                                     text=f"{self._zoom:.1f}×  (drag to pan, scroll out to reset)",
+                                     fill=DIM, font=UI)
+
+    def _on_wheel(self, event):
+        if self._orig_img is None or self._current() is None:
+            return
+        cw, ch = self._canvas.winfo_width(), self._canvas.winfo_height()
+        iw, ih = self._orig_img.size
+        fit = min((cw - 8) / iw, (ch - 8) / ih)
+        old_scale = fit * self._zoom
+        factor = 1.25 if event.delta > 0 else 1 / 1.25
+        self._zoom = min(max(self._zoom * factor, 1.0), 10.0)
+        new_scale = fit * self._zoom
+        # Keep the image point under the cursor fixed while zooming
+        if self._view_cx is not None:
+            px = self._view_cx + (event.x - cw / 2) / old_scale
+            py = self._view_cy + (event.y - ch / 2) / old_scale
+            self._view_cx = px - (event.x - cw / 2) / new_scale
+            self._view_cy = py - (event.y - ch / 2) / new_scale
+        self._render()
+
+    def _on_press(self, event):
+        self.focus_set()
+        self._drag_last = (event.x, event.y)
+
+    def _on_drag(self, event):
+        if self._orig_img is None or self._zoom <= 1.0 or self._drag_last is None:
+            return
+        cw, ch = self._canvas.winfo_width(), self._canvas.winfo_height()
+        iw, ih = self._orig_img.size
+        scale = min((cw - 8) / iw, (ch - 8) / ih) * self._zoom
+        dx = (event.x - self._drag_last[0]) / scale
+        dy = (event.y - self._drag_last[1]) / scale
+        self._view_cx -= dx
+        self._view_cy -= dy
+        self._drag_last = (event.x, event.y)
+        self._render()
 
     # ── Actions ───────────────────────────────────────────────────────────────
 
