@@ -356,15 +356,17 @@ class IngestTab(tk.Frame):
                         style="I.Horizontal.TProgressbar"
                         ).pack(fill='x', pady=(0,10))
 
+        # Buttons — packed to the bottom FIRST so they can never be pushed
+        # off-screen; the log then takes whatever space is left.
+        br = tk.Frame(c, bg=BG)
+        br.pack(side='bottom', fill='x', pady=(14,0))
+
         # Log
         lframe = lf(c, "Activity Log")
-        lframe.pack(fill='both', expand=True, pady=(0,14))
+        lframe.pack(fill='both', expand=True)
         self._log = make_log(lframe)
         self._log.pack(fill='both', expand=True, padx=4, pady=4)
 
-        # Buttons
-        br = tk.Frame(c, bg=BG)
-        br.pack(fill='x')
         self._start_btn = tk.Button(br, text="▶  START INGEST",
                                     command=self._start,
                                     bg=BLUE, fg=BG,
