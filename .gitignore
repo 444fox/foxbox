@@ -1,3 +1,6 @@
 __pycache__/
 .camera_ingest_cache.json
 .weed_sessions.json
+build/
+dist/
+*.spec

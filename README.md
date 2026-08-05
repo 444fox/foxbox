@@ -9,8 +9,11 @@ Supported video formats: MP4, MOV, AVI, MTS/M2TS, MKV, MXF, 3GP, WMV, and Insta3
 
 ## Getting started
 
-1. Install [Python](https://python.org) (3.10+) with "Add to PATH" checked.
-2. Double-click `run_ingest.bat` to install the two dependencies (Pillow, hachoir) and launch the app.
+**Easiest: the standalone app.** Download `FoxBox.exe` from the [Releases page](https://github.com/444fox/foxbox/releases) and double-click it. Nothing to install; Python and all libraries are bundled inside.
+
+**From source** (needs [Python](https://python.org) 3.10+ with "Add to PATH" checked):
+
+1. Double-click `run_ingest.bat` to install the two dependencies (Pillow, hachoir) and launch the app.
 
 Or by hand:
 
@@ -18,6 +21,10 @@ Or by hand:
 pip install -r requirements.txt
 python camera_ingest.py
 ```
+
+**Building the standalone exe yourself:** run `build_exe.bat`; the result lands in `dist\FoxBox.exe`.
+
+Bundled-library licenses: Python (PSF), Pillow (MIT-CMU), hachoir (GPL-2.0, source available in this repo's dependency listing and at the [hachoir project](https://github.com/vstinner/hachoir)).
 
 While any long job is running the app tells Windows not to sleep; normal power settings resume the moment the job finishes.
 
