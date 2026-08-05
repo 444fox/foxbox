@@ -1,6 +1,6 @@
 <p align="center"><img src="assets/logo.png" alt="FoxBox logo" width="180"/></p>
 
-# 🦊 FoxBox — Foxes Camera Toolbox
+# FoxBox — Foxes Camera Toolbox
 
 A single-window Windows toolbox for getting photos and videos off camera cards and into an organized library — then culling, deduplicating, shrinking, and color-correcting them (with a special soft spot for scuba photos). Everything lives in one dark-themed app with six tabs.
 
@@ -23,18 +23,18 @@ While any long job is running the app tells Windows not to sleep; normal power s
 
 ---
 
-## ▶ Ingest
+## Ingest
 
 Copies media off SD cards, renames each file by its capture time (`YYYYMMDDHHMMSS.jpg`), organizes into `YYYY/MM` subfolders, and verifies every copy before optionally deleting the source.
 
 **How to use**
 
-1. **🔌 ADD CARD…** — queue one or more source cards/folders. Queued sources run one after another, and you can add another card *while a run is in progress* (plug in card 2 while card 1 copies; it starts automatically when card 1 finishes). **➖ Remove** drops a selected entry from the queue.
+1. **ADD CARD…** — queue one or more source cards/folders. Queued sources run one after another, and you can add another card *while a run is in progress* (plug in card 2 while card 1 copies; it starts automatically when card 1 finishes). **Remove** drops a selected entry from the queue.
 2. Set a **Local USB Destination**, a **Remote Server Destination**, or both. Leave one blank to skip it — at least one is required.
 3. Options:
    - **Delete source files after verified copy** — sources are only deleted after every destination has a byte-verified copy.
    - **Organize into YYYY/MM subfolders** — off = everything lands flat in the destination root.
-4. **▶ START INGEST**.
+4. **START INGEST**.
 
 **What it does for you**
 
@@ -46,16 +46,16 @@ Copies media off SD cards, renames each file by its capture time (`YYYYMMDDHHMMS
 
 ---
 
-## 🛡 Safe Delete
+## Safe Delete
 
 Frees up a card you've already ingested: it proves every file on the card exists on your server before deleting anything from the card.
 
 **How to use**
 
 1. Set the **SD Card / Source** and the **File Server to Check** folder.
-2. **🔍 SCAN**. Matching runs in phases: filename match first, then content verification, then (with your permission) a full content search of the server for files that were renamed.
+2. **SCAN**. Matching runs in phases: filename match first, then content verification, then (with your permission) a full content search of the server for files that were renamed.
 3. Review the results table — every row shows the card file and exactly where its server copy lives.
-4. **🗑 DELETE MATCHED FROM SD** removes only the confirmed files, after a confirmation dialog.
+4. **DELETE MATCHED FROM SD** removes only the confirmed files, after a confirmation dialog.
 
 **Notes**
 
@@ -65,7 +65,7 @@ Frees up a card you've already ingested: it proves every file on the card exists
 
 ---
 
-## 🖼 Low-Res
+## Low-Res
 
 Makes Google Photos-friendly low-resolution JPEG copies of a photo folder. Originals are never modified.
 
@@ -74,13 +74,13 @@ Makes Google Photos-friendly low-resolution JPEG copies of a photo folder. Origi
 1. Pick a **Source Photos Folder** and a **Low-Res Output Folder**.
 2. Adjust **Max long edge** (default 2048 px) and **JPEG quality** (default 85) if desired.
 3. Options: mirror the subfolder structure, and skip files already converted (so re-runs are incremental).
-4. **▶ START CONVERT**.
+4. **START CONVERT**.
 
 EXIF data is preserved and orientation is baked in so copies display upright. Videos and unreadable files (e.g. RAW without codec support) are logged and skipped.
 
 ---
 
-## 🌱 Weed
+## Weed
 
 A fast keyboard-driven accept/reject culling tool.
 
@@ -105,19 +105,19 @@ A fast keyboard-driven accept/reject culling tool.
 
 ---
 
-## ♊ Dedup
+## Dedup
 
 Finds and removes true duplicate files in a library.
 
 **How to use**
 
-1. Pick a folder and **🔍 SCAN FOR DUPLICATES**.
+1. Pick a folder and **SCAN FOR DUPLICATES**.
 2. Same-size files are treated as suspects, then verified by content — photos byte-for-byte (SHA256), videos by size + head/tail fingerprint. Same-size-but-different files are never flagged.
-3. The table shows each duplicate next to the copy being **kept** (always the oldest). Nothing is deleted until you click **🗑 DELETE DUPLICATES** and confirm; the dialog shows how much space you'll recover.
+3. The table shows each duplicate next to the copy being **kept** (always the oldest). Nothing is deleted until you click **DELETE DUPLICATES** and confirm; the dialog shows how much space you'll recover.
 
 ---
 
-## 🤿 Dive Color
+## Dive Color
 
 Fixes the muted blue/green cast of underwater photos. Water absorbs red light first; this tool rebuilds it.
 
@@ -125,9 +125,9 @@ Fixes the muted blue/green cast of underwater photos. Water absorbs red light fi
 
 **How to use**
 
-1. **👁 PREVIEW A PHOTO…** — pick any dive shot and see before/after side by side. Drag the **Strength** slider (default 80%) and the preview updates live.
+1. **PREVIEW A PHOTO…** — pick any dive shot and see before/after side by side. Drag the **Strength** slider (default 80%) and the preview updates live.
 2. Set a **Source Photos Folder** and a **Corrected Output Folder** (must differ).
-3. **🤿 CORRECT ALL PHOTOS** — writes quality-92 JPEG copies mirroring your folder structure, EXIF preserved. Originals are never modified.
+3. **CORRECT ALL PHOTOS** — writes quality-92 JPEG copies mirroring your folder structure, EXIF preserved. Originals are never modified.
 
 Photos in `rejects` folders are ignored (weed first, then correct only the keepers). Already-corrected files are skipped on re-runs. The batch runs in parallel across all CPU cores.
 
