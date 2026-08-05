@@ -2567,6 +2567,12 @@ class DiveColorTab(tk.Frame):
 
             photos = [f for f in scan_media(src_p) if f.suffix.lower() in PHOTO_EXT]
             photos = [f for f in photos if dst_p not in f.parents]
+            # Skip weeded-out photos sitting in any 'rejects' folder
+            before = len(photos)
+            photos = [f for f in photos
+                      if 'rejects' not in (p.name.lower() for p in f.parents)]
+            if before - len(photos):
+                log(f"Ignoring {before - len(photos)} photo(s) in rejects folders.", 'dim')
             if not photos:
                 log("No photos found.", 'warn')
                 self._status_var.set("No photos found.")
