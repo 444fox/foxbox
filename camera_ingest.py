@@ -2684,6 +2684,16 @@ class App(tk.Tk):
         tk.Label(hdr, text="Foxes Camera Toolbox  —  Ingest | Weed | Dedup | Dive Color",
                  font=SUB, bg=BG, fg=DIM).pack(side='left', padx=(14,0), pady=(6,0))
 
+        # Manual keep-awake toggle — for when something OUTSIDE FoxBox
+        # (e.g. a Google Photos upload) must not be interrupted by sleep.
+        # FoxBox's own jobs hold the PC awake automatically either way.
+        self._awake_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(hdr, text="☕ Keep PC awake",
+                       variable=self._awake_var, command=self._toggle_awake,
+                       bg=BG, fg=TEXT, activebackground=BG, activeforeground=TEXT,
+                       selectcolor=PANEL, font=UI, cursor='hand2'
+                       ).pack(side='right', pady=(8,0))
+
         tk.Frame(self, bg=BLUE, height=2).pack(fill='x')
 
         # Notebook
@@ -2720,6 +2730,14 @@ class App(tk.Tk):
         nb.bind('<<NotebookTabChanged>>',
                 lambda e: self._weed_tab.focus_set()
                 if nb.select() == str(self._weed_tab) else None)
+
+    def _toggle_awake(self):
+        # Runs on the main thread, so this flag is independent of the
+        # per-thread flags FoxBox's own worker jobs set and clear.
+        if self._awake_var.get():
+            prevent_sleep()
+        else:
+            allow_sleep()
 
     def _check_deps(self):
         log = self._ingest_tab.log
