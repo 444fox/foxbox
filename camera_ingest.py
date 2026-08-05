@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 try:
-    from PIL import Image, ImageTk, ImageOps, ImageEnhance
+    from PIL import Image, ImageTk, ImageOps, ImageEnhance, ImageDraw
     from PIL.ExifTags import TAGS
     PILLOW_AVAILABLE = True
 except ImportError:
@@ -2693,6 +2693,11 @@ class App(tk.Tk):
                        bg=BG, fg=TEXT, activebackground=BG, activeforeground=TEXT,
                        selectcolor=PANEL, font=UI, cursor='hand2'
                        ).pack(side='right', pady=(8,0))
+        # nyan cat flies while the PC is being kept awake
+        self._nyan_label  = tk.Label(hdr, bg=BG)
+        self._nyan_frames = []
+        self._nyan_i      = 0
+        self._nyan_job    = None
 
         tk.Frame(self, bg=BLUE, height=2).pack(fill='x')
 
@@ -2736,8 +2741,75 @@ class App(tk.Tk):
         # per-thread flags FoxBox's own worker jobs set and clear.
         if self._awake_var.get():
             prevent_sleep()
+            self._start_nyan()
         else:
             allow_sleep()
+            self._stop_nyan()
+
+    # ── nyan cat ──────────────────────────────────────────────────────────────
+
+    def _make_nyan_frames(self):
+        """Two frames of pixel-art nyan cat, drawn in code (no asset files)."""
+        if not PILLOW_AVAILABLE:
+            return []
+        RAINBOW = [(255,59,48),(255,149,0),(255,230,32),(52,199,89),
+                   (0,122,255),(175,82,222)]
+        GRAY, DARKPX = (160,160,160), (40,40,40)
+        TART, FROST, CHEEK = (255,214,166), (255,153,204), (255,102,178)
+        frames = []
+        for f in range(2):
+            img = Image.new('RGBA', (48, 18), (0, 0, 0, 0))
+            d = ImageDraw.Draw(img)
+            # rainbow trail (stripes wiggle between frames)
+            for i, c in enumerate(RAINBOW):
+                y = 2 + i * 2
+                off = f if i % 2 == 0 else 1 - f
+                d.rectangle([0 + off, y, 19 + off, y + 1], fill=c + (255,))
+            # pop-tart body
+            d.rectangle([19, 2, 35, 14], fill=TART + (255,))
+            d.rectangle([21, 4, 33, 12], fill=FROST + (255,))
+            for (sx, sy) in ((23,6),(28,9),(31,5),(24,10)):   # sprinkles
+                d.point([sx, sy], fill=(214,61,150,255))
+            # head
+            d.rectangle([32, 4, 45, 13], fill=GRAY + (255,))
+            d.polygon([32,4, 32,1, 35,4], fill=GRAY + (255,))     # ears
+            d.polygon([45,4, 45,1, 42,4], fill=GRAY + (255,))
+            d.rectangle([35, 7, 36, 8], fill=DARKPX + (255,))     # eyes
+            d.rectangle([41, 7, 42, 8], fill=DARKPX + (255,))
+            d.rectangle([34, 10, 34, 11], fill=CHEEK + (255,))    # cheeks
+            d.rectangle([43, 10, 43, 11], fill=CHEEK + (255,))
+            d.rectangle([37, 11, 40, 11], fill=DARKPX + (255,))   # mouth
+            # legs (alternate for the run cycle)
+            for lx in (20, 25, 30, 36):
+                x = lx + (0 if f == 0 else 1)
+                d.rectangle([x, 15, x + 2, 17], fill=GRAY + (255,))
+            # tail
+            ty = 3 if f == 0 else 5
+            d.rectangle([16, ty, 19, ty + 1], fill=GRAY + (255,))
+            frames.append(ImageTk.PhotoImage(
+                img.resize((96, 36), Image.NEAREST)))
+        return frames
+
+    def _start_nyan(self):
+        if not self._nyan_frames:
+            self._nyan_frames = self._make_nyan_frames()
+        if not self._nyan_frames:
+            return
+        self._nyan_label.pack(side='right', padx=(0, 10), pady=(6, 0))
+        self._animate_nyan()
+
+    def _stop_nyan(self):
+        if self._nyan_job:
+            self.after_cancel(self._nyan_job)
+            self._nyan_job = None
+        self._nyan_label.pack_forget()
+
+    def _animate_nyan(self):
+        if not self._awake_var.get():
+            return
+        self._nyan_i = (self._nyan_i + 1) % len(self._nyan_frames)
+        self._nyan_label.configure(image=self._nyan_frames[self._nyan_i])
+        self._nyan_job = self.after(160, self._animate_nyan)
 
     def _check_deps(self):
         log = self._ingest_tab.log
