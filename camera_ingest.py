@@ -2666,6 +2666,10 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("FoxBox — Foxes Camera Toolbox")
+        try:
+            self.iconbitmap(str(Path(__file__).parent / 'foxbox.ico'))
+        except Exception:
+            pass   # icon is cosmetic — never block launch
         self.geometry("960x820")
         self.minsize(780, 640)
         self.configure(bg=BG)

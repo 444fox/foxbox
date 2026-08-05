@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- FoxBox — Foxes Camera Toolbox -->
+  <rect x="20" y="20" width="472" height="472" rx="100" fill="#22262f" stroke="#3c4250" stroke-width="6"/>
+  <!-- ears -->
+  <polygon points="102,88 218,172 128,246" fill="#e8834a"/>
+  <polygon points="410,88 294,172 384,246" fill="#e8834a"/>
+  <polygon points="122,116 196,172 138,220" fill="#b85f2e"/>
+  <polygon points="390,116 316,172 374,220" fill="#b85f2e"/>
+  <!-- head -->
+  <polygon points="92,178 420,178 452,262 256,452 60,262" fill="#e8834a"/>
+  <!-- cheeks / chin -->
+  <polygon points="256,452 120,280 200,260 256,330" fill="#f0e4d6"/>
+  <polygon points="256,452 392,280 312,260 256,330" fill="#f0e4d6"/>
+  <!-- eyes -->
+  <circle cx="180" cy="232" r="22" fill="#111318"/>
+  <circle cx="332" cy="232" r="22" fill="#111318"/>
+  <circle cx="190" cy="224" r="6" fill="#ffffff" opacity="0.9"/>
+  <circle cx="342" cy="224" r="6" fill="#ffffff" opacity="0.9"/>
+  <!-- camera-lens snout -->
+  <circle cx="256" cy="330" r="74" fill="#111318" stroke="#4fa3e0" stroke-width="10"/>
+  <circle cx="256" cy="330" r="46" fill="#2c3140" stroke="#7bbfe8" stroke-width="4"/>
+  <ellipse cx="252" cy="308" rx="12" ry="12" fill="#c8e2f5" opacity="0.82"/>
+</svg>

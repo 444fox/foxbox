@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.png" alt="FoxBox logo" width="180"/></p>
+
 # 🦊 FoxBox — Foxes Camera Toolbox
 
 A single-window Windows toolbox for getting photos and videos off camera cards and into an organized library — then culling, deduplicating, shrinking, and color-correcting them (with a special soft spot for scuba photos). Everything lives in one dark-themed app with six tabs.
