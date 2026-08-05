@@ -1500,6 +1500,7 @@ class WeedTab(tk.Frame):
     """
     REJECT_DIR = 'rejects'
     STATE_FILE = Path(__file__).parent / '.weed_sessions.json'
+    STRIP_COUNT = 5   # upcoming photos shown in the right-side filmstrip
 
     def __init__(self, parent):
         super().__init__(parent, bg=BG)
@@ -1557,14 +1558,33 @@ class WeedTab(tk.Frame):
         tk.Label(sr, text="Jump to #", bg=BG, fg=DIM, font=UI
                  ).pack(side='right', padx=(0,4))
 
-        # Image viewer
-        self._canvas = tk.Canvas(c, bg='#111318', highlightthickness=1,
+        # Image viewer + "up next" filmstrip on the right
+        viewer = tk.Frame(c, bg=BG)
+        viewer.pack(fill='both', expand=True, pady=(0,10))
+        self._canvas = tk.Canvas(viewer, bg='#111318', highlightthickness=1,
                                  highlightbackground=DIM)
-        self._canvas.pack(fill='both', expand=True, pady=(0,10))
+        self._canvas.pack(side='left', fill='both', expand=True)
         self._canvas.bind('<Configure>', lambda e: self._show_current())
         self._canvas.bind('<Button-1>', self._on_press)
         self._canvas.bind('<B1-Motion>', self._on_drag)
         self._canvas.bind('<MouseWheel>', self._on_wheel)
+
+        strip = tk.Frame(viewer, bg=BG, width=158)
+        strip.pack(side='right', fill='y', padx=(8,0))
+        strip.pack_propagate(False)
+        tk.Label(strip, text="UP NEXT", bg=BG, fg=DIM, font=LABEL
+                 ).pack(pady=(0,4))
+        self._strip_slots = []
+        for _ in range(self.STRIP_COUNT):
+            fr = tk.Frame(strip, bg=BG)
+            fr.pack(pady=3)
+            img_l = tk.Label(fr, bg='#111318', fg=DIM, font=UI,
+                             width=150, height=100, cursor='hand2')
+            img_l.pack()
+            txt_l = tk.Label(fr, text='', bg=BG, fg=DIM, font=('Segoe UI', 8))
+            txt_l.pack()
+            self._strip_slots.append((img_l, txt_l))
+        self._thumb_cache = {}   # path -> PhotoImage (bounded)
 
         # Keyboard shortcuts hint
         self._hint_label = tk.Label(
@@ -1782,13 +1802,56 @@ class WeedTab(tk.Frame):
             n = int(self._jump_var.get().strip())
         except ValueError:
             return
-        self._idx = min(max(n, 1), len(self._queue)) - 1
         self._jump_var.set('')
+        self._jump_index(min(max(n, 1), len(self._queue)) - 1)
+
+    def _jump_index(self, i: int):
+        self._idx = i
         for b in (self._accept_btn, self._reject_btn):
             b.configure(state='normal')
         self.focus_set()
         self._save_state()
         self._show_current()
+
+    # ── Filmstrip ─────────────────────────────────────────────────────────────
+
+    def _thumb(self, path):
+        """Small cached thumbnail for the filmstrip (draft mode = fast)."""
+        ph = self._thumb_cache.get(path)
+        if ph is not None:
+            return ph
+        try:
+            with Image.open(path) as img:
+                img.draft('RGB', (300, 200))     # fast JPEG partial decode
+                img = ImageOps.exif_transpose(img)
+                img.thumbnail((150, 100), Image.BILINEAR)
+                ph = ImageTk.PhotoImage(img)
+        except Exception:
+            ph = None
+        if len(self._thumb_cache) > 60:          # bound the cache
+            for k in list(self._thumb_cache)[:20]:
+                del self._thumb_cache[k]
+        self._thumb_cache[path] = ph
+        return ph
+
+    def _update_strip(self):
+        for slot_i, (img_l, txt_l) in enumerate(self._strip_slots):
+            qi = self._idx + 1 + slot_i
+            if self._active and qi < len(self._queue):
+                p = self._queue[qi]
+                ph = self._thumb(p)
+                if ph:
+                    img_l.configure(image=ph, text='', width=ph.width(), height=ph.height())
+                else:
+                    img_l.configure(image='', text='⚠', width=18, height=6)
+                img_l.image = ph
+                txt_l.configure(text=f"#{qi+1}  {p.name[:20]}")
+                img_l.bind('<Button-1>', lambda e, n=qi: self._jump_index(n))
+            else:
+                img_l.configure(image='', text='', width=18, height=6)
+                img_l.image = None
+                img_l.unbind('<Button-1>')
+                txt_l.configure(text='')
 
     def _show_current(self):
         cur = self._current()
@@ -1800,6 +1863,7 @@ class WeedTab(tk.Frame):
             f"#{min(self._idx + 1, len(self._queue))} of {len(self._queue)}   "
             f"✓ {self._accepted}   ✗ {self._rejected}   remaining {remaining}"
             if self._active else "")
+        self._update_strip()
 
         if cur is None:
             if self._active:
