@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 try:
-    from PIL import Image, ImageTk, ImageOps
+    from PIL import Image, ImageTk, ImageOps, ImageEnhance
     from PIL.ExifTags import TAGS
     PILLOW_AVAILABLE = True
 except ImportError:
@@ -1914,6 +1914,44 @@ class WeedTab(tk.Frame):
         self._show_current()
 
 
+# ── Underwater color correction ───────────────────────────────────────────────
+
+def dive_correct(img, strength: float = 1.0):
+    """
+    Correct the blue/green cast of underwater photos.
+    Water absorbs red light first, so each RGB channel is stretched back to
+    full range via a per-channel LUT (0.4% percentile clip, red gain capped
+    so a fully-lost red channel doesn't amplify into pure noise), then a
+    gentle saturation/contrast lift. strength 0..1 blends with the original.
+    """
+    rgb = img.convert('RGB')
+    hist = rgb.histogram()
+    total = rgb.width * rgb.height
+    clip = total * 0.004
+    MAX_GAIN = 4.0
+    lut = []
+    for c in range(3):
+        h = hist[c*256:(c+1)*256]
+        lo, acc = 0, 0
+        while lo < 255 and acc + h[lo] < clip:
+            acc += h[lo]; lo += 1
+        hi, acc = 255, 0
+        while hi > 0 and acc + h[hi] < clip:
+            acc += h[hi]; hi -= 1
+        if hi - lo < 255 / MAX_GAIN:          # cap the gain (noise guard)
+            mid = (lo + hi) / 2
+            lo = max(0, mid - 255 / MAX_GAIN / 2)
+            hi = lo + 255 / MAX_GAIN
+        scale = 255.0 / (hi - lo)
+        lut += [min(255, max(0, round((i - lo) * scale))) for i in range(256)]
+    out = rgb.point(lut)
+    out = ImageEnhance.Color(out).enhance(1.15)
+    out = ImageEnhance.Contrast(out).enhance(1.05)
+    if strength < 1.0:
+        out = Image.blend(rgb, out, max(0.0, strength))
+    return out
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 5 — Dedup
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2218,6 +2256,255 @@ class DedupTab(tk.Frame):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# TAB 6 — Dive Color (underwater correction)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class DiveColorTab(tk.Frame):
+    """
+    Batch-correct the muted blue/green cast of scuba photos.
+    Writes corrected JPEG copies to an output folder — originals untouched.
+    Preview shows before/after on any photo before committing to a batch.
+    """
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG)
+        self._src_var      = tk.StringVar()
+        self._dst_var      = tk.StringVar()
+        self._strength_var = tk.IntVar(value=80)
+        self._status_var   = tk.StringVar(value="Ready.")
+        self._prog_var     = tk.DoubleVar(value=0.0)
+        self._running          = False
+        self._cancel_requested = False
+        self._preview_ref  = None
+        self._preview_path = None
+        self._build()
+
+    def _build(self):
+        c = tk.Frame(self, bg=BG)
+        c.pack(fill='both', expand=True, padx=28, pady=18)
+
+        # Paths
+        pf = lf(c, "Paths")
+        pf.pack(fill='x', pady=(0,10))
+        pf.grid_columnconfigure(1, weight=1)
+        path_row(pf, "Source Photos Folder",     self._src_var,
+                 lambda: self._browse(self._src_var, "Select Source Photos Folder"), 0)
+        path_row(pf, "Corrected Output Folder",  self._dst_var,
+                 lambda: self._browse(self._dst_var, "Select Output Folder"), 1)
+
+        # Options
+        of = lf(c, "Correction")
+        of.pack(fill='x', pady=(0,10))
+        tk.Label(of, text="Strength", font=LABEL, bg=PANEL, fg=TEXT
+                 ).grid(row=0, column=0, padx=(12,6), pady=6, sticky='w')
+        tk.Scale(of, variable=self._strength_var, from_=0, to=100,
+                 orient='horizontal', bg=PANEL, fg=TEXT,
+                 troughcolor='#2c3140', highlightthickness=0,
+                 activebackground=BLUE, length=260,
+                 command=lambda v: self._update_preview()
+                 ).grid(row=0, column=1, padx=(0,20), pady=2, sticky='w')
+        tk.Button(of, text="👁  PREVIEW A PHOTO…", command=self._pick_preview,
+                  bg=BLUE, fg=BG, activebackground='#7bbfe8', activeforeground=BG,
+                  relief='flat', font=SEMIBOLD, cursor='hand2', padx=14, pady=4
+                  ).grid(row=0, column=2, padx=(0,12), pady=6, sticky='e')
+
+        # Preview canvas (before | after)
+        prf = lf(c, "Preview — Before | After")
+        prf.pack(fill='both', expand=True, pady=(0,10))
+        self._preview = tk.Canvas(prf, bg='#111318', highlightthickness=0)
+        self._preview.pack(fill='both', expand=True, padx=4, pady=4)
+        self._preview.bind('<Configure>', lambda e: self._update_preview())
+
+        # Progress
+        tk.Label(c, textvariable=self._status_var, bg=BG, fg=DIM,
+                 font=UI, anchor='w').pack(fill='x', pady=(0,4))
+        style = ttk.Style()
+        style.configure("DC.Horizontal.TProgressbar",
+                        troughcolor=PANEL, background='#4fd0e0',
+                        bordercolor=PANEL, lightcolor='#4fd0e0', darkcolor='#4fd0e0')
+        ttk.Progressbar(c, variable=self._prog_var, maximum=100,
+                        style="DC.Horizontal.TProgressbar"
+                        ).pack(fill='x', pady=(0,8))
+
+        # Buttons (bottom-anchored so they never clip)
+        br = tk.Frame(c, bg=BG)
+        br.pack(side='bottom', fill='x', pady=(8,0))
+
+        # Log
+        lframe = lf(c, "Activity Log")
+        lframe.pack(fill='x')
+        self._log = make_log(lframe)
+        self._log.configure(height=5)
+        self._log.pack(fill='x', padx=4, pady=4)
+
+        self._start_btn = tk.Button(br, text="🤿  CORRECT ALL PHOTOS",
+                                    command=self._start,
+                                    bg='#4fd0e0', fg=BG,
+                                    activebackground='#7be0ec', activeforeground=BG,
+                                    relief='flat', font=SEMIBOLD,
+                                    cursor='hand2', padx=22, pady=8)
+        self._start_btn.pack(side='left')
+        self._cancel_btn = tk.Button(br, text="✕  CANCEL",
+                                     command=self._cancel,
+                                     bg=RED, fg=BG,
+                                     activebackground='#f07070', activeforeground=BG,
+                                     relief='flat', font=SEMIBOLD,
+                                     cursor='hand2', padx=16, pady=8,
+                                     state='disabled')
+        self._cancel_btn.pack(side='left', padx=(10,0))
+        tk.Button(br, text="Clear Log",
+                  command=lambda: (self._log.configure(state='normal'),
+                                   self._log.delete('1.0','end'),
+                                   self._log.configure(state='disabled')),
+                  bg=PANEL, fg=DIM, activebackground=BG,
+                  relief='flat', font=UI, cursor='hand2', padx=14, pady=8
+                  ).pack(side='left', padx=(10,0))
+
+    def _browse(self, var, title):
+        p = filedialog.askdirectory(title=title)
+        if p: var.set(p)
+
+    def log(self, msg, tag='info'):
+        wlog(self._log, msg, tag)
+
+    def _cancel(self):
+        if self._running:
+            self._cancel_requested = True
+            self._cancel_btn.configure(state='disabled', text="Cancelling…")
+
+    # ── Preview ───────────────────────────────────────────────────────────────
+
+    def _pick_preview(self):
+        if not PILLOW_AVAILABLE:
+            messagebox.showerror("Pillow Required", "pip install Pillow")
+            return
+        exts = ' '.join(f'*{e}' for e in sorted(PHOTO_EXT))
+        p = filedialog.askopenfilename(title="Pick a Photo to Preview",
+                                       filetypes=[("Photos", exts), ("All files", "*.*")])
+        if p:
+            self._preview_path = Path(p)
+            self._update_preview()
+
+    def _update_preview(self):
+        if not self._preview_path or not PILLOW_AVAILABLE:
+            return
+        cw = self._preview.winfo_width()
+        ch = self._preview.winfo_height()
+        if cw < 40 or ch < 40:
+            return
+        try:
+            with Image.open(self._preview_path) as img:
+                img = ImageOps.exif_transpose(img)
+                img.thumbnail((cw // 2 - 6, ch - 8), Image.LANCZOS)
+                before = img.convert('RGB')
+        except Exception as e:
+            self._preview.delete('all')
+            self._preview.create_text(cw//2, ch//2, text=f"⚠  {e}",
+                                      fill=YELLOW, font=UI)
+            return
+        after = dive_correct(before, self._strength_var.get() / 100.0)
+        pair = Image.new('RGB', (before.width * 2 + 4, before.height), '#111318')
+        pair.paste(before, (0, 0))
+        pair.paste(after, (before.width + 4, 0))
+        self._preview_ref = ImageTk.PhotoImage(pair)
+        self._preview.delete('all')
+        self._preview.create_image(cw // 2, ch // 2, image=self._preview_ref)
+
+    # ── Batch run ─────────────────────────────────────────────────────────────
+
+    def _start(self):
+        if self._running: return
+        if not PILLOW_AVAILABLE:
+            messagebox.showerror("Pillow Required", "pip install Pillow")
+            return
+        src, dst = self._src_var.get().strip(), self._dst_var.get().strip()
+        if not src or not dst:
+            messagebox.showerror("Missing Paths", "Please set both source and output folders.")
+            return
+        src_p, dst_p = Path(src), Path(dst)
+        if not src_p.exists():
+            messagebox.showerror("Not Found", f"Source folder not found:\n{src}")
+            return
+        if dst_p.resolve() == src_p.resolve():
+            messagebox.showerror("Bad Paths", "Output folder must differ from source.")
+            return
+        self._running = True
+        self._cancel_requested = False
+        self._prog_var.set(0)
+        self._start_btn.configure(state='disabled', text="⏳  Correcting…")
+        self._cancel_btn.configure(state='normal', text="✕  CANCEL")
+        threading.Thread(target=self._run,
+                         args=(src_p, dst_p, self._strength_var.get() / 100.0),
+                         daemon=True).start()
+
+    def _run(self, src_p: Path, dst_p: Path, strength: float):
+        log = self.log
+        prevent_sleep()
+        try:
+            log("═"*60, 'accent')
+            log(f"Source   : {src_p}", 'accent')
+            log(f"Output   : {dst_p}", 'accent')
+            log(f"Strength : {int(strength*100)}%", 'accent')
+            log("═"*60, 'accent')
+
+            photos = [f for f in scan_media(src_p) if f.suffix.lower() in PHOTO_EXT]
+            photos = [f for f in photos if dst_p not in f.parents]
+            if not photos:
+                log("No photos found.", 'warn')
+                self._status_var.set("No photos found.")
+                return
+            log(f"Found {len(photos)} photo(s).", 'ok')
+
+            total = len(photos)
+            done = skipped = failed = 0
+            for i, src in enumerate(photos, 1):
+                if self._cancel_requested:
+                    log("Cancelled by user.", 'warn')
+                    break
+                self._prog_var.set((i-1)/total*100)
+                self._status_var.set(f"Correcting {i}/{total}: {src.name}")
+                sub = src.parent.relative_to(src_p)
+                out = dst_p / sub / (src.stem + '.jpg')
+                if out.exists():
+                    skipped += 1
+                    continue
+                try:
+                    with Image.open(src) as img:
+                        img = ImageOps.exif_transpose(img)
+                        exif = img.info.get('exif')
+                        corrected = dive_correct(img, strength)
+                        out.parent.mkdir(parents=True, exist_ok=True)
+                        save_kw = dict(quality=92, optimize=True)
+                        if exif:
+                            save_kw['exif'] = exif
+                        corrected.save(out, 'JPEG', **save_kw)
+                    done += 1
+                    log(f"  ✓ {src.name}", 'ok')
+                except Exception as e:
+                    failed += 1
+                    log(f"  ✗ {src.name}: {e}", 'error')
+
+            self._prog_var.set(100)
+            log("─"*60, 'dim')
+            log(f"DONE — {done} corrected, {skipped} already done, {failed} failed.",
+                'ok' if not failed else 'warn')
+            self._status_var.set(
+                f"Complete: {done} corrected, {skipped} skipped, {failed} failed.")
+        except Exception as e:
+            import traceback
+            log(f"\n✗ Unexpected error: {e}", 'error')
+            log(traceback.format_exc(), 'error')
+            self._status_var.set("Error — see log.")
+        finally:
+            allow_sleep()
+            self._running = False
+            self._cancel_requested = False
+            self.after(0, lambda: self._start_btn.configure(
+                state='normal', text="🤿  CORRECT ALL PHOTOS"))
+            self.after(0, lambda: self._cancel_btn.configure(
+                state='disabled', text="✕  CANCEL"))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Main App Window
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -2262,12 +2549,14 @@ class App(tk.Tk):
         self._lowres_tab = LowResTab(nb)
         self._weed_tab   = WeedTab(nb)
         self._dedup_tab  = DedupTab(nb)
+        self._dive_tab   = DiveColorTab(nb)
 
         nb.add(self._ingest_tab, text="  ▶  Ingest  ")
         nb.add(self._safe_tab,   text="  🛡  Safe Delete  ")
         nb.add(self._lowres_tab, text="  🖼  Low-Res  ")
         nb.add(self._weed_tab,   text="  🌱  Weed  ")
         nb.add(self._dedup_tab,  text="  ♊  Dedup  ")
+        nb.add(self._dive_tab,   text="  🤿  Dive Color  ")
 
         # Give the Weed tab keyboard focus when selected so shortcuts work
         nb.bind('<<NotebookTabChanged>>',
