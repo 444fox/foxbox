@@ -1,5 +1,5 @@
 """
-Camera Ingest Tool  v2
+FoxBox — Foxes Camera Toolbox
   Tab 1 — Ingest : scan SD → rename by capture time → copy to USB + server → verify → delete
   Tab 2 — Safe Delete : scan SD + server, match by SHA256 hash, delete confirmed copies from SD
   Tab 3 — Low-Res : make Google-Photos-friendly low-res JPEG copies of a folder
@@ -2555,9 +2555,20 @@ class DiveColorTab(tk.Frame):
                          args=(src_p, dst_p, self._strength_var.get() / 100.0),
                          daemon=True).start()
 
+    MANIFEST = '.dive_color_manifest.json'
+
     def _run(self, src_p: Path, dst_p: Path, strength: float):
         log = self.log
         prevent_sleep()
+        # Manifest of already-graded photos: rel output -> src size/mtime/strength.
+        # Lets re-runs skip finished work, but re-grade if the strength setting
+        # or the source photo changed since it was graded.
+        manifest_path = dst_p / self.MANIFEST
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8')) \
+                if manifest_path.exists() else {}
+        except Exception:
+            manifest = {}
         try:
             log("═"*60, 'accent')
             log(f"Source   : {src_p}", 'accent')
@@ -2654,7 +2665,7 @@ class DiveColorTab(tk.Frame):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Camera Ingest")
+        self.title("FoxBox — Foxes Camera Toolbox")
         self.geometry("960x820")
         self.minsize(780, 640)
         self.configure(bg=BG)
@@ -2665,8 +2676,8 @@ class App(tk.Tk):
         # Header
         hdr = tk.Frame(self, bg=BG, pady=16)
         hdr.pack(fill='x', padx=28)
-        tk.Label(hdr, text="CAMERA INGEST", font=TITLE, bg=BG, fg=TEXT).pack(side='left')
-        tk.Label(hdr, text="SD → USB + Server  |  Safe Delete",
+        tk.Label(hdr, text="🦊 FOXBOX", font=TITLE, bg=BG, fg=TEXT).pack(side='left')
+        tk.Label(hdr, text="Foxes Camera Toolbox  —  Ingest | Weed | Dedup | Dive Color",
                  font=SUB, bg=BG, fg=DIM).pack(side='left', padx=(14,0), pady=(6,0))
 
         tk.Frame(self, bg=BLUE, height=2).pack(fill='x')

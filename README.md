@@ -1,6 +1,6 @@
-# Camera Ingest
+# 🦊 FoxBox — Foxes Camera Toolbox
 
-A single-window Windows tool for getting photos and videos off camera cards and into an organized library — then culling, deduplicating, shrinking, and color-correcting them. Everything lives in one dark-themed app with six tabs.
+A single-window Windows toolbox for getting photos and videos off camera cards and into an organized library — then culling, deduplicating, shrinking, and color-correcting them (with a special soft spot for scuba photos). Everything lives in one dark-themed app with six tabs.
 
 Supported photo formats: JPG, PNG, HEIC/HEIF, TIFF, and common RAW (CR2/CR3, NEF, ARW, DNG, RAF, ORF).
 Supported video formats: MP4, MOV, AVI, MTS/M2TS, MKV, MXF, 3GP, WMV, and Insta360 `.insv`.

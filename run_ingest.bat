@@ -1,5 +1,5 @@
 @echo off
-title Camera Ingest Setup
+title FoxBox Setup
 
 echo Checking Python...
 python --version >nul 2>&1
@@ -13,7 +13,7 @@ if errorlevel 1 (
 echo Installing dependencies...
 pip install -r requirements.txt --quiet
 
-echo Launching Camera Ingest...
+echo Launching FoxBox...
 python camera_ingest.py
 
 pause
