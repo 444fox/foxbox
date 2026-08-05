@@ -59,6 +59,30 @@ SEMIBOLD= ('Segoe UI Semibold', 11)
 
 # ── Shared helpers ─────────────────────────────────────────────────────────────
 
+# ── Keep-awake ────────────────────────────────────────────────────────────────
+# While a long job runs (ingest, scan, convert), tell Windows not to sleep.
+# SetThreadExecutionState is per-thread, so each worker thread sets/clears
+# its own flag; the flag also clears automatically if the thread dies.
+
+ES_CONTINUOUS      = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+
+def prevent_sleep():
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetThreadExecutionState(
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+    except Exception:
+        pass
+
+def allow_sleep():
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+    except Exception:
+        pass
+
+
 def delete_file(path: Path):
     """Delete a file, clearing the read-only attribute first (camera files
     often arrive read-only on Windows, which makes unlink fail with WinError 5)."""
@@ -461,6 +485,7 @@ class IngestTab(tk.Frame):
     def _run(self, local_p, remote_p):
         log = self.log
         totals = {'success': 0, 'failed': 0, 'duplicates': 0, 'sources': 0}
+        prevent_sleep()
         try:
             while True:
                 sd_p = self._pop_source()
@@ -482,6 +507,7 @@ class IngestTab(tk.Frame):
             log(traceback.format_exc(), 'error')
             self._status_var.set("Error — see log.")
         finally:
+            allow_sleep()
             self._running = False
             self.after(0, lambda: self._start_btn.configure(
                 state='normal', text="▶  START INGEST"))
@@ -784,6 +810,7 @@ class SafeDeleteTab(tk.Frame):
     def _run_scan(self, sd_p: Path, srv_p: Path):
         log = self.log
         WORKERS = 8   # parallel threads — tune up/down for your network
+        prevent_sleep()
         try:
             log("═"*60, 'orange')
             log(f"SD Card : {sd_p}", 'orange')
@@ -1161,6 +1188,7 @@ class SafeDeleteTab(tk.Frame):
             log(traceback.format_exc(), 'error')
             self._status_var.set("Error — see log.")
         finally:
+            allow_sleep()
             self._running = False
             self._cancel_requested = False
             self.after(0, lambda: self._scan_btn.configure(
@@ -1382,6 +1410,7 @@ class LowResTab(tk.Frame):
         log = self.log
         do_sub  = self._subdir_var.get()
         do_skip = self._skip_var.get()
+        prevent_sleep()
         try:
             log("═"*60, 'accent')
             log(f"Source  : {src_p}", 'accent')
@@ -1446,6 +1475,7 @@ class LowResTab(tk.Frame):
             log(traceback.format_exc(), 'error')
             self._status_var.set("Error — see log.")
         finally:
+            allow_sleep()
             self._running = False
             self._cancel_requested = False
             self.after(0, lambda: self._start_btn.configure(
@@ -2035,6 +2065,7 @@ class DedupTab(tk.Frame):
 
     def _run_scan(self, src_p: Path):
         log = self.log
+        prevent_sleep()
         try:
             log("═"*60, 'accent')
             log(f"Folder : {src_p}", 'accent')
@@ -2138,6 +2169,7 @@ class DedupTab(tk.Frame):
             log(traceback.format_exc(), 'error')
             self._status_var.set("Error — see log.")
         finally:
+            allow_sleep()
             self._running = False
             self._cancel_requested = False
             self.after(0, lambda: self._scan_btn.configure(
