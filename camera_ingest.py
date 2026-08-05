@@ -1543,6 +1543,19 @@ class WeedTab(tk.Frame):
                  font=UI, anchor='w').pack(side='left')
         tk.Label(sr, textvariable=self._count_var, bg=BG, fg=BLUE,
                  font=SEMIBOLD, anchor='e').pack(side='right')
+        # Jump-to-photo-number field
+        self._jump_var = tk.StringVar()
+        tk.Button(sr, text="Go", command=self._jump_to,
+                  bg=PANEL, fg=BLUE, activebackground=BG,
+                  relief='flat', font=UI, cursor='hand2', padx=8, pady=1
+                  ).pack(side='right', padx=(4,14))
+        jump_entry = tk.Entry(sr, textvariable=self._jump_var, width=6,
+                              bg='#2c3140', fg=TEXT, insertbackground=TEXT,
+                              relief='flat', font=UI, justify='center')
+        jump_entry.pack(side='right')
+        jump_entry.bind('<Return>', lambda e: self._jump_to())
+        tk.Label(sr, text="Jump to #", bg=BG, fg=DIM, font=UI
+                 ).pack(side='right', padx=(0,4))
 
         # Image viewer
         self._canvas = tk.Canvas(c, bg='#111318', highlightthickness=1,
@@ -1654,14 +1667,19 @@ class WeedTab(tk.Frame):
         return {}
 
     def _save_state(self):
-        """Persist current position after every action (or clear when done)."""
+        """Persist current position after every action.
+        When the folder is finished, remember the last photo reviewed so
+        photos added later resume from the first NEW photo, not the start."""
         src = self._src_var.get().strip()
         if not src:
             return
         states = self._load_states()
         cur = self._current()
         if cur is None:
-            states.pop(src, None)        # session finished — forget it
+            entry = {'accepted': self._accepted, 'rejected': self._rejected}
+            if self._queue:
+                entry['done_through'] = str(self._queue[-1])
+            states[src] = entry
         else:
             states[src] = {'next': str(cur),
                            'accepted': self._accepted,
@@ -1707,18 +1725,38 @@ class WeedTab(tk.Frame):
         # Offer to resume a previous session on this folder
         state = self._load_states().get(src)
         if state:
-            nxt = str(state.get('next', '')).lower()
-            resume_idx = next((i for i, f in enumerate(photos)
-                               if str(f).lower() >= nxt), None)
-            if resume_idx is not None and resume_idx > 0:
-                if messagebox.askyesno(
-                        "Resume Weeding?",
-                        f"You have an unfinished session on this folder\n"
-                        f"({state.get('accepted', 0)} accepted, "
-                        f"{state.get('rejected', 0)} rejected, "
-                        f"{len(photos) - resume_idx} photo(s) left).\n\n"
-                        "Resume where you left off?\n"
-                        "(No = start over from the first photo)"):
+            resume_idx = None
+            prompt = None
+            if 'next' in state:
+                nxt = str(state['next']).lower()
+                resume_idx = next((i for i, f in enumerate(photos)
+                                   if str(f).lower() >= nxt), None)
+                if resume_idx is not None and resume_idx > 0:
+                    prompt = (f"You have an unfinished session on this folder\n"
+                              f"({state.get('accepted', 0)} accepted, "
+                              f"{state.get('rejected', 0)} rejected, "
+                              f"{len(photos) - resume_idx} photo(s) left).\n\n"
+                              "Resume where you left off?\n"
+                              "(No = start over from the first photo)")
+            elif 'done_through' in state:
+                # Folder was finished before — jump to photos added since then
+                done = str(state['done_through']).lower()
+                resume_idx = next((i for i, f in enumerate(photos)
+                                   if str(f).lower() > done), None)
+                if resume_idx is None:
+                    if not messagebox.askyesno(
+                            "Already Weeded",
+                            "This folder was already fully weeded and has no "
+                            "new photos.\n\nGo through it again from the start?"):
+                        return
+                elif resume_idx > 0:
+                    prompt = (f"This folder was already weeded — "
+                              f"{len(photos) - resume_idx} NEW photo(s) were "
+                              f"added since.\n\n"
+                              "Start at the first new photo?\n"
+                              "(No = start over from the first photo)")
+            if prompt and resume_idx:
+                if messagebox.askyesno("Resume Weeding?", prompt):
                     self._idx      = resume_idx
                     self._accepted = int(state.get('accepted', 0))
                     self._rejected = int(state.get('rejected', 0))
@@ -1736,6 +1774,22 @@ class WeedTab(tk.Frame):
             return self._queue[self._idx]
         return None
 
+    def _jump_to(self):
+        """Jump to a photo number (1-based) typed in the Jump to # field."""
+        if not self._active or not self._queue:
+            return
+        try:
+            n = int(self._jump_var.get().strip())
+        except ValueError:
+            return
+        self._idx = min(max(n, 1), len(self._queue)) - 1
+        self._jump_var.set('')
+        for b in (self._accept_btn, self._reject_btn):
+            b.configure(state='normal')
+        self.focus_set()
+        self._save_state()
+        self._show_current()
+
     def _show_current(self):
         cur = self._current()
         self._canvas.delete('all')
@@ -1743,6 +1797,7 @@ class WeedTab(tk.Frame):
         ch = self._canvas.winfo_height()
         remaining = len(self._queue) - self._idx if self._active else 0
         self._count_var.set(
+            f"#{min(self._idx + 1, len(self._queue))} of {len(self._queue)}   "
             f"✓ {self._accepted}   ✗ {self._rejected}   remaining {remaining}"
             if self._active else "")
 
