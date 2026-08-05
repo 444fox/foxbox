@@ -2580,33 +2580,51 @@ class DiveColorTab(tk.Frame):
             log(f"Found {len(photos)} photo(s).", 'ok')
 
             total = len(photos)
-            done = skipped = failed = 0
-            for i, src in enumerate(photos, 1):
+            counts = {'done': 0, 'skipped': 0, 'failed': 0, 'n': 0}
+            lock = threading.Lock()
+            # Pillow releases the GIL during JPEG decode/encode, so threads
+            # scale across cores — this is what keeps all CPUs busy.
+            workers = max(2, (os.cpu_count() or 4) - 1)
+            log(f"Using {workers} parallel workers.", 'dim')
+
+            def correct_one(src: Path):
                 if self._cancel_requested:
-                    log("Cancelled by user.", 'warn')
-                    break
-                self._prog_var.set((i-1)/total*100)
-                self._status_var.set(f"Correcting {i}/{total}: {src.name}")
+                    return
                 sub = src.parent.relative_to(src_p)
                 out = dst_p / sub / (src.stem + '.jpg')
-                if out.exists():
-                    skipped += 1
-                    continue
                 try:
-                    with Image.open(src) as img:
-                        img = ImageOps.exif_transpose(img)
-                        exif = img.info.get('exif')
-                        corrected = dive_correct(img, strength)
-                        out.parent.mkdir(parents=True, exist_ok=True)
-                        save_kw = dict(quality=92, optimize=True)
-                        if exif:
-                            save_kw['exif'] = exif
-                        corrected.save(out, 'JPEG', **save_kw)
-                    done += 1
-                    log(f"  ✓ {src.name}", 'ok')
+                    if out.exists():
+                        with lock:
+                            counts['skipped'] += 1
+                    else:
+                        with Image.open(src) as img:
+                            img = ImageOps.exif_transpose(img)
+                            exif = img.info.get('exif')
+                            corrected = dive_correct(img, strength)
+                            out.parent.mkdir(parents=True, exist_ok=True)
+                            save_kw = dict(quality=92)
+                            if exif:
+                                save_kw['exif'] = exif
+                            corrected.save(out, 'JPEG', **save_kw)
+                        with lock:
+                            counts['done'] += 1
+                        log(f"  ✓ {src.name}", 'ok')
                 except Exception as e:
-                    failed += 1
+                    with lock:
+                        counts['failed'] += 1
                     log(f"  ✗ {src.name}: {e}", 'error')
+                finally:
+                    with lock:
+                        counts['n'] += 1
+                        n = counts['n']
+                    self._prog_var.set(n / total * 100)
+                    self._status_var.set(f"Correcting {n}/{total}: {src.name}")
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                list(pool.map(correct_one, photos))
+            if self._cancel_requested:
+                log("Cancelled by user.", 'warn')
+            done, skipped, failed = counts['done'], counts['skipped'], counts['failed']
 
             self._prog_var.set(100)
             log("─"*60, 'dim')
