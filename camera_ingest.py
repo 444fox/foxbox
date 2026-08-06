@@ -1517,6 +1517,8 @@ class WeedTab(tk.Frame):
         self._fullscreen = False
         # Zoom / pan state (scroll wheel to zoom, drag to pan)
         self._orig_img   = None     # full-res PIL image of current photo
+        self._corr_img   = None     # dive-corrected version (lazy, preview only)
+        self._dive_var   = None     # set in _build
         self._shown_path = None
         self._zoom       = 1.0      # 1.0 = fit to canvas
         self._view_cx    = None     # view center in image coords
@@ -1589,7 +1591,7 @@ class WeedTab(tk.Frame):
         # Keyboard shortcuts hint
         self._hint_label = tk.Label(
             c, text="↑ / A = Accept (stays in place)      ↓ / R = Reject (→ rejects subfolder)      "
-                    "← / U = Undo      Scroll = Zoom (drag to pan)      F / F11 = Fullscreen      Esc = Exit",
+                    "← / U = Undo      Scroll = Zoom      D = Dive Color preview      F / F11 = Fullscreen      Esc = Exit",
             bg=BG, fg=DIM, font=UI)
         self._hint_label.pack(pady=(0,8))
 
@@ -1638,14 +1640,51 @@ class WeedTab(tk.Frame):
                   cursor='hand2', padx=16, pady=8
                   ).pack(side='right')
 
+        # Preview-only dive color correction (uses Dive Color tab's strength)
+        self._dive_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(br, text="🤿 Dive Color preview",
+                       variable=self._dive_var, command=self._dive_toggled,
+                       bg=BG, fg=TEXT, activebackground=BG, activeforeground=TEXT,
+                       selectcolor=PANEL, font=UI, cursor='hand2'
+                       ).pack(side='right', padx=(0, 14))
+
         # Key bindings (only act while a weeding session is active)
         for key, fn in (('<Up>',    self._accept), ('a', self._accept), ('A', self._accept),
                         ('<Down>',  self._reject), ('r', self._reject), ('R', self._reject),
                         ('<Left>',  self._undo),   ('u', self._undo), ('U', self._undo),
+                        ('d', self._dive_key),     ('D', self._dive_key),
                         ('f', self._toggle_fullscreen), ('F', self._toggle_fullscreen),
                         ('<F11>',    self._toggle_fullscreen),
                         ('<Escape>', self._exit_fullscreen)):
             self.bind(key, lambda e, fn=fn: fn())
+
+    # ── Dive-color preview ────────────────────────────────────────────────────
+
+    def _dive_key(self):
+        self._dive_var.set(not self._dive_var.get())
+        self._dive_toggled()
+
+    def _dive_toggled(self):
+        self.focus_set()
+        self._render()
+
+    def _dive_strength(self):
+        """Use the strength slider from the Dive Color tab if reachable."""
+        try:
+            return self.winfo_toplevel()._dive_tab._strength_var.get() / 100.0
+        except Exception:
+            return 0.8
+
+    def _display_img(self):
+        """The image to show: original, or dive-corrected when previewing."""
+        if self._orig_img is None or not (self._dive_var and self._dive_var.get()):
+            return self._orig_img
+        if self._corr_img is None:
+            try:
+                self._corr_img = dive_correct(self._orig_img, self._dive_strength())
+            except Exception:
+                return self._orig_img
+        return self._corr_img
 
     # ── Fullscreen ────────────────────────────────────────────────────────────
 
@@ -1885,6 +1924,7 @@ class WeedTab(tk.Frame):
             self._shown_path = cur
             self._zoom = 1.0
             self._view_cx = self._view_cy = None
+            self._corr_img = None
             try:
                 with Image.open(cur) as img:
                     self._orig_img = ImageOps.exif_transpose(img).copy()
@@ -1907,7 +1947,7 @@ class WeedTab(tk.Frame):
 
     def _render(self, cw=None, ch=None):
         """Draw the current photo at the current zoom/pan."""
-        img = self._orig_img
+        img = self._display_img()
         if img is None:
             return
         if cw is None:
