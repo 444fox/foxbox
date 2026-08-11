@@ -93,6 +93,49 @@ def delete_file(path: Path):
     path.unlink()
 
 
+def find_sidecars(src: Path) -> list:
+    """
+    Low-res proxy / thumbnail files that belong to a video and should be
+    deleted along with it:
+      GoPro    : GH010123.MP4 -> GL010123.LRV, GH010123.THM
+      Insta360 : VID_x_00_y.insv -> LRV_x_01_y.insv (or .lrv; the third
+                 underscore group flips 00 -> 01 on the proxy)
+      generic  : same name with .lrv/.thm extension
+    """
+    stem, parent = src.stem, src.parent
+    cands = set()
+    for ext in ('.lrv', '.LRV', '.thm', '.THM'):
+        cands.add(parent / (stem + ext))
+    if len(stem) > 2 and stem[:2].upper() == 'GH':
+        for ext in ('.lrv', '.LRV'):
+            cands.add(parent / ('GL' + stem[2:] + ext))
+    if stem[:4].upper() == 'VID_':
+        for base in (stem[4:], stem[4:].replace('_00_', '_01_')):
+            for ext in ('.lrv', '.LRV', '.insv', '.INSV'):
+                cands.add(parent / ('LRV_' + base + ext))
+    # Windows is case-insensitive, so .thm and .THM resolve to the same
+    # file — dedupe by lowercased path
+    found = {}
+    for p in cands:
+        if p.exists() and p != src:
+            # resolve() recovers the true on-disk casing
+            found.setdefault(str(p).lower(), p.resolve())
+    return sorted(found.values())
+
+
+def delete_with_sidecars(src: Path, log_fn=None):
+    """Delete a file plus any camera proxy/thumbnail sidecars next to it."""
+    delete_file(src)
+    for sc in find_sidecars(src):
+        try:
+            delete_file(sc)
+            if log_fn:
+                log_fn(f"  🗑  Deleted sidecar: {sc.name}", 'ok')
+        except Exception as e:
+            if log_fn:
+                log_fn(f"  ✗ Could not delete sidecar {sc.name}: {e}", 'error')
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, 'rb') as f:
@@ -561,7 +604,7 @@ class IngestTab(tk.Frame):
                     log(f"  ⊃ Duplicate of {seen_hashes[src_hash]} — copy skipped", 'warn')
                     if do_del:
                         try:
-                            delete_file(src)
+                            delete_with_sidecars(src, log)
                             log(f"  🗑  Deleted duplicate source: {src.name}", 'ok')
                         except Exception as e:
                             log(f"  ✗ Could not delete source: {e}", 'error')
@@ -588,7 +631,7 @@ class IngestTab(tk.Frame):
                     seen_hashes[src_hash] = dest_name
                     if do_del:
                         try:
-                            delete_file(src)
+                            delete_with_sidecars(src, log)
                             log(f"  🗑  Deleted source: {src.name}", 'ok')
                         except Exception as e:
                             log(f"  ✗ Could not delete source: {e}", 'error')
@@ -1227,7 +1270,7 @@ class SafeDeleteTab(tk.Frame):
 
         for idx, (sd_file, server_file, _) in enumerate(self._matches):
             try:
-                delete_file(sd_file)
+                delete_with_sidecars(sd_file, log)
                 log(f"  🗑  Deleted: {sd_file.name}", 'ok')
                 if idx < len(matched_items):
                     self._tree.item(matched_items[idx],
