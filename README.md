@@ -140,20 +140,6 @@ Photos in `rejects` folders are ignored (weed first, then correct only the keepe
 
 ---
 
-## Dives
-
-A thumbnail grid for sorting a folder of photos into named dives.
-
-**How to use**
-
-1. Pick a **Photos Folder** and click **LOAD**. Thumbnails stream in as they decode; photos already inside `Dives/` or `rejects/` folders are excluded.
-2. Select photos: **click** toggles one, **Shift+click** selects a range, and the bar has **Select All** / **Select None**. Selected photos get a blue border and the status line shows the count.
-3. Type a **dive name** (or pick an existing one from the dropdown) and click **MOVE TO DIVE**. The selection moves into `<folder>/Dives/<name>/` and disappears from the grid.
-
-Dive folders you create are remembered in the dropdown, so splitting one day's shooting across several dives is just select, pick name, move, repeat.
-
----
-
 ## Files the app creates
 
 | File | Purpose |
